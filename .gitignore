@@ -1,0 +1,5 @@
+/build/
+/.tmp/
+# Game and mod assets the tests use but this repository may not redistribute. Never commit them.
+/samples/
+/tests/fixtures/pynifly/
