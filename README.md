@@ -3,7 +3,7 @@
 Merges Skyrim character NIFs (body / hands / feet `_0`+`_1` weight pairs, a head or in-game FaceGen
 head, hair and other head parts) onto a skeleton NIF and writes **one skinned FBX that Unity imports
 as a Humanoid**, with one material slot per source shape. A companion Unity package configures the
-avatar and builds Standard-shader materials automatically.
+avatar and builds materials automatically (a Skyrim skin shader for skin, Standard for the rest).
 
 Research, design decisions and open items: [docs/DEV_PLAN.md](docs/DEV_PLAN.md).
 
@@ -73,12 +73,16 @@ Add the package `unity/com.nifmerge.importer` (Package Manager → *Add package 
 
 - sets **Animation Type = Humanoid**, mapping Skyrim bones to Unity's (Hips = `NPC COM [COM ]`), with
   a T-pose reference skeleton (the mesh keeps Skyrim's arms-down bind pose);
-- creates `<name>_Materials/*.mat` (Standard shader) and remaps the model's slots onto them;
+- creates `<name>_Materials/*.mat` and remaps the model's slots onto them. Skin slots use the
+  package's *NifMerge/Skyrim Skin* shader, which adds Skyrim's specular (colour × strength, masked by
+  the `_s` map, glossiness as the Blinn-Phong exponent) on top of the diffuse as the game does. Every
+  other slot uses Standard;
 - writes `<name>_Materials/ImportReport.txt` listing anything it could not do.
 
 Textures: put Skyrim's textures in **Assets/SkyrimTextures** (configurable under *Project Settings →
 NifMerge Importer*), keeping the folder structure below `textures\`. Diffuse maps and FaceGen tints
-are used directly as `.dds`. Normal maps are converted to PNGs the Standard shader can use:
+are used directly as `.dds`. Skin specular maps (`_s`) are used as `.dds` too, with sRGB decoding
+switched off, because they are masks. Normal maps are converted to PNGs Unity's shaders can use:
 - tangent-space maps (`_n`): green flipped from DirectX to Unity's convention, specular mask
   removed from alpha (`<name>_unity_n.png`);
 - model-space maps (`_msn`, used by Skyrim's body, hands, feet and head skin): baked to tangent
@@ -87,8 +91,11 @@ are used directly as `.dds`. Normal maps are converted to PNGs the Standard shad
 
 *Tools → NifMerge* rebuilds materials after adding textures.
 
-Known limit of the Standard shader, reported per slot in the import report: double-sided slots
-render front faces only.
+Known limits, the first reported per slot in the import report:
+- double-sided slots render front faces only;
+- the skin shader does not reproduce Skyrim's rim, soft or back lighting (the `_sk` map), so skin is
+  darker at silhouettes than in game;
+- non-skin slots ignore Skyrim's specular mask and strength.
 
 ### Command line
 
@@ -123,7 +130,7 @@ Set `NIFMERGE_BUILD=<build dir>` to point the Python tests at a build tree other
 |---|---|
 | `build\tests\Release\core_tests.exe` | Re-pose vs. an independent evaluation of the game's skinning formula (nifly math) on every sample and fixture; FaceGen part placement; weight blending; seam-continuous normals; merge invariants; FBX read-back (geometry, materials, bind pose = rest pose); TRI decoding; morph-to-part matching decisions; exact reproduction of matched morphs; surface transfer (left/right consistency against the source masks' own, locality); blend shapes surviving the FBX round trip; outfit: each sample item replacing or adding exactly what its slots say, the head's eyes, mouth and brows kept, everything left visible unchanged, seam-continuous normals when dressed, two items in one slot rejected, and (with nifly-written stand-ins) a helmet hiding only the hair and per-partition hiding of a body split into two slots. |
 | `python tests\run_gui_test.py` | Drives the real GUI (`gui --go`, the character wearing the sample outfit) and checks its output is identical to the CLI's, plus exit codes and a window screenshot. Then builds the same character by real drag and drop (`gui_input`: OLE drags, as from Explorer, onto each section, and a real click on Go!) and checks that output is identical too, which only holds if every file landed in the section it was dropped on. It moves the mouse, so leave it alone while it runs. |
-| `python tests\run_unity_harness.py` | Batch-mode Unity (6000.0 and 2022.3): automatic import → valid Humanoid avatar, every bone mapping, 12 Standard materials, texture resolution, normal-map conversion, model-space → tangent-space bake of the user's real `_msn` maps (round-trip, agreement with Unity's mesh normals, no added seams), orientation/scale, bind-pose skinning, T-pose reference, retargeting vs. a canonical T-pose rig, blend shapes (all imported, at rest when zeroed, blinks on the correct side, `Aah` opens the mouth, head-only), screenshots including face close-ups. A second model wears the sample outfit: Humanoid, the replaced parts absent, every material built, the items' normal maps converted and alpha modes set, the dress's body copy baked from its `_msn` map. |
+| `python tests\run_unity_harness.py` | Batch-mode Unity (6000.0 and 2022.3): automatic import → valid Humanoid avatar, every bone mapping, 12 materials (Skyrim Skin on skin slots, Standard elsewhere), skin specular (the `_s` mask assigned and imported as data, colour × strength and glossiness carried over, and a rendered quad matching Skyrim's specular formula at two light angles, in Gamma and Linear colour space), texture resolution, normal-map conversion, model-space → tangent-space bake of the user's real `_msn` maps (round-trip, agreement with Unity's mesh normals, no added seams), orientation/scale, bind-pose skinning, T-pose reference, retargeting vs. a canonical T-pose rig, blend shapes (all imported, at rest when zeroed, blinks on the correct side, `Aah` opens the mouth, head-only), screenshots including face close-ups. A second model wears the sample outfit: Humanoid, the replaced parts absent, every material built, the items' normal maps converted and alpha modes set, the dress's body copy baked from its `_msn` map. |
 
 The tests need two sets of Skyrim assets, and neither is committed, because the repository may not
 redistribute them. A missing fixture fails the tests.

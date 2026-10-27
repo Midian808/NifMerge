@@ -6,11 +6,12 @@ using UnityEngine;
 namespace NifMerge
 {
     // Finds NifMerge FBX files (an FBX with a NifMerge .materials.json beside it) and configures them:
-    // Humanoid avatar with a T-pose reference, and one Standard material per slot remapped onto the model.
+    // Humanoid avatar with a T-pose reference, and one material per slot (NifMergeMaterials) remapped onto
+    // the model.
     public class NifMergeImporter : AssetPostprocessor
     {
         const string StampPrefix = "nifmerge:";
-        const string ImporterVersion = "4";
+        const string ImporterVersion = "5";
 
         static void OnPostprocessAllAssets(string[] imported, string[] deleted, string[] moved, string[] movedFrom)
         {

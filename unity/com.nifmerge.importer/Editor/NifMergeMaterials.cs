@@ -7,10 +7,14 @@ using UnityEngine.Rendering;
 
 namespace NifMerge
 {
-    // Builds one Built-in pipeline Standard material per sidecar slot, in <fbx dir>/<fbx name>_Materials.
-    // Skyrim's BSLightingShader has no exact Standard equivalent; each mapping below is stated where made.
+    // Builds one Built-in pipeline material per sidecar slot, in <fbx dir>/<fbx name>_Materials. Skin
+    // slots (SkinTint and FaceGen shader types) use the package's Skyrim Skin shader, which reproduces
+    // Skyrim's additive specular; every other slot uses Standard. Skyrim's BSLightingShader has no exact
+    // Standard equivalent; each mapping below is stated where made.
     public static class NifMergeMaterials
     {
+        public const string SkinShader = "NifMerge/Skyrim Skin", SkinFadeShader = "NifMerge/Skyrim Skin (Fade)";
+
         static readonly int MainTex = Shader.PropertyToID("_MainTex");
         static readonly int Color = Shader.PropertyToID("_Color");
         static readonly int BumpMap = Shader.PropertyToID("_BumpMap");
@@ -21,6 +25,12 @@ namespace NifMerge
         static readonly int Metallic = Shader.PropertyToID("_Metallic");
         static readonly int SpecularHighlights = Shader.PropertyToID("_SpecularHighlights");
         static readonly int Cutoff = Shader.PropertyToID("_Cutoff");
+        static readonly int SpecMap = Shader.PropertyToID("_SpecMap");
+        static readonly int SkyrimSpecColor = Shader.PropertyToID("_SkyrimSpecColor");
+        static readonly int Shininess = Shader.PropertyToID("_Shininess");
+
+        public static bool IsSkin(MaterialEntry m) =>
+            m.shaderType == MaterialEntry.TypeSkinTint || m.shaderType == MaterialEntry.TypeFaceGen;
 
         public static List<(string name, Material mat)> Build(string fbxPath, Sidecar sidecar, string texturesRoot,
                                                               List<string> warnings)
@@ -29,12 +39,15 @@ namespace NifMerge
             string stem = Path.GetFileNameWithoutExtension(fbxPath);
             string folder = EnsureFolder(dir, stem + "_Materials");
             var textures = IndexTextures(texturesRoot, warnings);
-            var shader = Shader.Find("Standard");
-            if (shader == null) throw new System.InvalidOperationException("NifMerge: the Standard shader is not available");
+            var standard = FindShader("Standard");
+            var skin = FindShader(SkinShader);
+            var skinFade = FindShader(SkinFadeShader);
 
             var result = new List<(string, Material)>();
             foreach (var m in sidecar.materials)
             {
+                // Skin that blends without alpha testing needs the Fade variant; Cutout is a keyword.
+                var shader = !IsSkin(m) ? standard : !m.AlphaTest && m.AlphaBlend ? skinFade : skin;
                 string matPath = $"{folder}/{SafeFileName(m.name)}.mat";
                 var mat = AssetDatabase.LoadAssetAtPath<Material>(matPath);
                 bool created = mat == null;
@@ -47,6 +60,13 @@ namespace NifMerge
             }
             AssetDatabase.SaveAssets();
             return result;
+        }
+
+        static Shader FindShader(string name)
+        {
+            var shader = Shader.Find(name);
+            if (shader == null) throw new System.InvalidOperationException($"NifMerge: the {name} shader is not available");
+            return shader;
         }
 
         static void Setup(Material mat, MaterialEntry m, Dictionary<string, string> textures, string folder,
@@ -75,12 +95,13 @@ namespace NifMerge
             // Normal map.
             mat.SetTexture(BumpMap, null);
             mat.DisableKeyword("_NORMALMAP");
+            Texture2D normalSource = null;
             if (!string.IsNullOrEmpty(m.Texture(1)))
             {
                 // Model-space maps (_msn) are converted by NifMergeNormalBaker once the mesh is imported.
                 if (!m.modelSpaceNormals)
                 {
-                    var src = Resolve(m.Texture(1), textures, label + " normal map", warnings);
+                    var src = normalSource = Resolve(m.Texture(1), textures, label + " normal map", warnings);
                     if (src != null)
                     {
                         var converted = ConvertNormalMap(src, folder, warnings);
@@ -106,13 +127,20 @@ namespace NifMerge
                 }
             }
 
-            // Specular: Blinn-Phong power -> Standard smoothness via roughness = sqrt(2 / (power + 2)).
-            mat.SetFloat(Metallic, 0f);
             bool specular = (m.shaderFlags1 & 1) != 0;
-            mat.SetFloat(Glossiness, specular ? 1f - Mathf.Sqrt(2f / (Mathf.Max(m.glossiness, 0f) + 2f)) : 0f);
-            mat.SetFloat(SpecularHighlights, specular ? 1f : 0f);
-            if (specular) mat.DisableKeyword("_SPECULARHIGHLIGHTS_OFF");
-            else mat.EnableKeyword("_SPECULARHIGHLIGHTS_OFF");
+            if (IsSkin(m))
+            {
+                SetupSkinSpecular(mat, m, specular, normalSource, textures, label, warnings);
+            }
+            else
+            {
+                // Specular: Blinn-Phong power -> Standard smoothness via roughness = sqrt(2 / (power + 2)).
+                mat.SetFloat(Metallic, 0f);
+                mat.SetFloat(Glossiness, specular ? 1f - Mathf.Sqrt(2f / (Mathf.Max(m.glossiness, 0f) + 2f)) : 0f);
+                mat.SetFloat(SpecularHighlights, specular ? 1f : 0f);
+                if (specular) mat.DisableKeyword("_SPECULARHIGHLIGHTS_OFF");
+                else mat.EnableKeyword("_SPECULARHIGHLIGHTS_OFF");
+            }
 
             // Emission.
             mat.SetTexture(EmissionMap, null);
@@ -138,7 +166,68 @@ namespace NifMerge
             else SetBlendMode(mat, 0, 0.5f);
 
             if (m.doubleSided)
-                warnings.Add($"{label}: double-sided in Skyrim; the Standard shader renders front faces only");
+                warnings.Add($"{label}: double-sided in Skyrim; the material renders front faces only");
+        }
+
+        // Skyrim's specular as the skin shader computes it: specular colour x strength, unclamped and
+        // added on top of the diffuse, the Blinn-Phong exponent as is, and the mask. Model-space slots
+        // take the mask from the _s map in slot 7 (red channel), tangent-space slots from the normal
+        // map's alpha.
+        static void SetupSkinSpecular(Material mat, MaterialEntry m, bool specular, Texture2D normalSource,
+                                      Dictionary<string, string> textures, string label, List<string> warnings)
+        {
+            var s = new Color(Get(m.specularColor, 0, 1), Get(m.specularColor, 1, 1), Get(m.specularColor, 2, 1)) *
+                    Mathf.Max(m.specularStrength, 0f);
+            s.a = 1f;
+            mat.SetColor(SkyrimSpecColor, specular ? s : UnityEngine.Color.black);
+            mat.SetFloat(Shininess, Mathf.Max(m.glossiness, 0f));
+            mat.SetTexture(SpecMap, null);
+            mat.DisableKeyword("_SPECMAP_ALPHA");
+            if (!specular) return;
+
+            if (m.modelSpaceNormals)
+            {
+                if (string.IsNullOrEmpty(m.Texture(7)))
+                {
+                    warnings.Add($"{label}: no specular map in slot 7; specular is unmasked");
+                    return;
+                }
+                var mask = Resolve(m.Texture(7), textures, label + " specular map", warnings);
+                if (mask == null) return;
+                ImportAsData(mask, label + " specular map", warnings);
+                mat.SetTexture(SpecMap, AssetDatabase.LoadAssetAtPath<Texture2D>(AssetDatabase.GetAssetPath(mask)));
+            }
+            else if (normalSource != null)
+            {
+                mat.SetTexture(SpecMap, normalSource);
+                mat.EnableKeyword("_SPECMAP_ALPHA");
+            }
+        }
+
+        // A mask is data, so it is sampled without sRGB decoding, as Skyrim samples it. DDS files come
+        // through IHVImageFormatImporter, which has the flag only as the serialized field m_sRGBTexture.
+        static void ImportAsData(Texture2D tex, string what, List<string> warnings)
+        {
+            string path = AssetDatabase.GetAssetPath(tex);
+            var importer = AssetImporter.GetAtPath(path);
+            if (importer is TextureImporter ti)
+            {
+                if (!ti.sRGBTexture) return;
+                ti.sRGBTexture = false;
+                ti.SaveAndReimport();
+                return;
+            }
+            var flag = importer != null ? new SerializedObject(importer).FindProperty("m_sRGBTexture") : null;
+            if (flag == null)
+            {
+                warnings.Add($"{what} '{path}': sRGB decoding could not be switched off; the mask reads darker in Linear colour space");
+                return;
+            }
+            var so = flag.serializedObject;
+            if (!flag.boolValue) return;
+            flag.boolValue = false;
+            so.ApplyModifiedPropertiesWithoutUndo();
+            importer.SaveAndReimport();
         }
 
         // Mirrors StandardShaderGUI.SetupMaterialWithBlendMode. mode: 0 Opaque, 1 Cutout, 2 Fade.

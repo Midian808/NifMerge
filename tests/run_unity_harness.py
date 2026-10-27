@@ -132,6 +132,9 @@ def harness(unity: Path) -> bool:
     write_dds(tex / texture_rel(hair["textures"][0]), (128, 128, 128, 255), b"DXT5")
     write_dds(tex / texture_rel(hair["textures"][1]), (128, 64, 255, 100), b"DXT5")
     write_dds(tex / texture_rel(head["textures"][6]), (128, 128, 128, 255), b"DXT1")
+    # Skin specular masks (_s, slot 7): red is the mask.
+    write_dds(tex / texture_rel(body["textures"][7]), (100, 100, 100, 255), b"DXT1")
+    write_dds(tex / texture_rel(head["textures"][7]), (60, 60, 60, 255), b"DXT1")
     # The outfit's items: a diffuse and a tangent-space normal map each.
     outfit_mats = json.loads(outfit_fbx.with_name("Outfit.materials.json").read_text())["materials"]
     for m in outfit_mats:

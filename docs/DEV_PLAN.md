@@ -137,7 +137,7 @@ They must be carried byte-exact.
   model-space normal maps** (`SLSF1_MODEL_SPACE_NORMALS`; `_msn.dds` in slot 1, specular in
   slot 7) and therefore **store no vertex normals**. The tool computes area-weighted smooth normals
   after merging. They are welded by position, so UV seams and the neck, wrist and ankle part seams
-  shade continuously. Unity's Standard shader only accepts tangent-space normal maps, so the
+  shade continuously. Unity's shaders only accept tangent-space normal maps, so the
   Unity package converts these `_msn` maps (see §5).
 
 ### 1.7 This machine
@@ -225,7 +225,8 @@ built around. glTF imports through packages that do not support Humanoid avatar 
 - **Unity, the real consumer:** `tests/run_unity_harness.py` runs batch-mode 6000.0.68f1 and
   2022.3.61f1. The FBX is placed in a project that has the package, and the import happens
   automatically, the way a user's does. The harness then checks: the avatar is valid and human;
-  every Humanoid mapping is live; 12 Standard materials; textures resolved from the textures root;
+  every Humanoid mapping is live; 12 materials (Skyrim Skin on skin slots, Standard elsewhere);
+  skin specular (see §5); textures resolved from the textures root;
   the tangent-space normal map is converted (green flipped, alpha opaque); the user's real `_msn`
   maps are baked to tangent space (see §5 for the checks);
   orientation and scale (head bone position, left hand on -X, eyes forward); bind-pose skinning
@@ -469,7 +470,7 @@ whole head are kept.
     (positions, normals, UVs), and removes the feet whole.
 - GUI test: the character wears all three items, and the GUI's FBX and sidecar equal the CLI's.
 - Unity (6000.0.68 and 2022.3.61): a second model wears all three items. Checks: Humanoid valid; the
-  replaced parts absent; every material a Standard `.mat`; the items' diffuse assigned, normal maps
+  replaced parts absent; every material a `.mat` with its expected shader; the items' diffuse assigned, normal maps
   converted and alpha modes set; the dress's body copy baked from `femalebody_1_msn.dds`; bind-pose
   skinning exact; `outfit_bind_pose.png` rendered.
 
@@ -479,13 +480,15 @@ whole head are kept.
 ## 5. Open questions (asked one at a time)
 
 Decided: the tool ships the Unity editor package (M5), and its materials target the
-**Built-in render pipeline, Standard shader**. Alpha slots use the Standard shader's Cutout or Fade
-rendering mode, chosen from the `NiAlphaProperty` test/blend flags.
+**Built-in render pipeline**. Skin slots (SkinTint and FaceGen shader types) use the package's own
+**Skyrim Skin** shader (see *Skin specular* below); every other slot uses the **Standard** shader.
+Alpha slots use Cutout or Fade, chosen from the `NiAlphaProperty` test/blend flags: Standard's
+rendering modes, or for skin the `_ALPHATEST_ON` keyword or the *Skyrim Skin (Fade)* variant.
 
 ### Model-space normal maps (built)
 
 The skin slots' `_msn` maps (§1.6) are converted to tangent space by the Unity package
-(`NifMergeNormalBaker`), because the Standard shader only takes tangent-space maps.
+(`NifMergeNormalBaker`), because Unity's shaders only take tangent-space maps.
 
 - **Channel convention (measured).** Measured on the user's `femalebody_1_msn.dds`,
   `femalehands_1_msn.dds` and `femalehead_msn.dds`: each decoded texel was compared with the
@@ -531,3 +534,41 @@ The skin slots' `_msn` maps (§1.6) are converted to tangent space by the Unity 
   BodySlide-morphed body (e.g. larger breasts) the map's normals and the geometry disagree, and the
   game lights the reference shape's normals. The bake keeps that behaviour: it converts the map's
   normals faithfully rather than re-deriving them from the morphed geometry.
+
+### Skin specular (built)
+
+Skyrim lights skin with a Blinn-Phong specular added on top of the diffuse. It has no energy
+conservation and no N·L factor (vanilla code path, read from Community Shaders' `LightingEval.hlsli`).
+Per light:
+
+- diffuse = albedo · saturate(N·L) · light colour
+- specular = pow(saturate(N·H), glossiness) · specular colour · specular strength · mask · light colour
+
+The light colour includes the shadow. The mask is the `_s` map's red channel on model-space slots
+(slot 7) and the normal map's alpha on tangent-space slots. The sample skin has strength 3,
+colour white and glossiness 30.
+
+Standard cannot express this. Its specular colour is a Fresnel reflectance that is taken away from the
+diffuse. Matching Skyrim's peak at glossiness 30 needs F0 = 8·strength/(n + 2) = 0.75, which would
+leave a quarter of the diffuse. So skin uses the package's **Skyrim Skin** shader
+(`unity/com.nifmerge.importer/Shaders`). It is a Built-in surface shader with that lighting function,
+`_SkyrimSpecColor` = colour × strength (HDR, unclamped), `_Shininess` = glossiness, `_SpecMap` = the
+mask, and ambient light on the diffuse only. The importer switches the `_s` map's sRGB decoding off,
+because the mask is data.
+
+**Checks (Unity harness).** Body, head and the dress's body copy use the shader, with the `_s` map
+assigned, non-sRGB, and colour × strength and glossiness carried over. A flat quad with the body
+material, lit along its normal and then at 40°, is rendered with and without specular, in Gamma
+and in Linear colour space. The difference is compared with the formula, using the albedo and mask
+read from the stored texels. In Linear, a mask that was still sRGB-decoded would read about a third
+of its value (0.39 → 0.13), so this checks the import setting through the rendered result.
+
+**Not reproduced (known gaps):**
+- Rim, soft and back lighting. They read the slot-2 `_sk` map (the samples' skin sets
+  `SLSF2_Rim_Lighting`). Without them, skin is darker at silhouettes than in game.
+- Gamma-space lighting. Skyrim adds light in gamma space; Unity's Linear projects add it in linear
+  space, so mid-tone falloff and the size of the highlight differ somewhat.
+- Non-skin specular. The Standard path ignores the specular mask and strength. It also maps
+  glossiness to smoothness as 1 − sqrt(2/(n + 2)). Unity's own Blinn-Phong conversion
+  (`PerceptualRoughnessToSpecPower`, n = 2/r⁴ − 2 for perceptual roughness r) gives
+  1 − (2/(n + 2))^¼, so the current mapping is too smooth (0.75 instead of 0.5 at n = 30).

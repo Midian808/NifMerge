@@ -95,7 +95,8 @@ public static class NifMergeHarness
             {
                 string path = mats[i] ? AssetDatabase.GetAssetPath(mats[i]) : "";
                 Check(path == $"{matFolder}/{sidecar.materials[i].name}.mat", $"slot {i} uses {sidecar.materials[i].name}.mat (got '{path}')");
-                Check(mats[i] && mats[i].shader.name == "Standard", $"slot {i} uses the Standard shader");
+                string want = ExpectedShader(sidecar.materials[i]);
+                Check(mats[i] && mats[i].shader.name == want, $"slot {i} uses the {want} shader (got '{(mats[i] ? mats[i].shader.name : "")}')");
             }
             // Slots are found by role (see Roles), never by the sample's own shape names.
             int bodySlot = Roles.Body(sidecar), hairSlot = Roles.Hair(sidecar), headSlot = Roles.Head(sidecar);
@@ -129,6 +130,16 @@ public static class NifMergeHarness
             CheckModelSpaceNormals(smr, sidecar, mats, warnings);
             Check(SameTexture(TexPath(mats[headSlot], "_DetailAlbedoMap"), sidecar.materials[headSlot].Texture(6)),
                   "FaceGen tint assigned as detail map");
+            CheckSkinSpecular(mats[bodySlot], sidecar.materials[bodySlot], "body");
+            CheckSkinSpecular(mats[headSlot], sidecar.materials[headSlot], "head");
+            // Both colour spaces: the scratch project starts in Gamma, users' projects are often Linear.
+            var colorSpace = PlayerSettings.colorSpace;
+            foreach (var cs in new[] { ColorSpace.Gamma, ColorSpace.Linear })
+            {
+                PlayerSettings.colorSpace = cs;
+                MeasureSkinSpecular(mats[bodySlot], sidecar.materials[bodySlot]);
+            }
+            PlayerSettings.colorSpace = colorSpace;
 
             // ---- Orientation and scale: Skyrim (x, y, z) units -> Unity (x, z, y) metres, facing +Z.
             const float k = 0.0142875f;
@@ -237,8 +248,9 @@ public static class NifMergeHarness
             {
                 var e = sidecar.materials[i];
                 string path = mats[i] ? AssetDatabase.GetAssetPath(mats[i]) : "";
-                Check(path == $"Assets/NifMergeTest/Outfit_Materials/{e.name}.mat" && mats[i].shader.name == "Standard",
-                      $"outfit: slot {i} ({e.shape}, {e.role}) uses a Standard {e.name}.mat (got '{path}')");
+                string wantShader = ExpectedShader(e);
+                Check(path == $"Assets/NifMergeTest/Outfit_Materials/{e.name}.mat" && mats[i].shader.name == wantShader,
+                      $"outfit: slot {i} ({e.shape}, {e.role}) uses a {wantShader} {e.name}.mat (got '{path}', {(mats[i] ? mats[i].shader.name : "")})");
                 if (e.role != "outfit" || e.modelSpaceNormals) continue;
                 // An item: diffuse from the textures root, tangent-space map converted, alpha mode from NiAlphaProperty.
                 Check(SameTexture(TexPath(mats[i], "_MainTex"), e.Texture(0)), $"outfit: {e.shape} diffuse assigned");
@@ -250,6 +262,7 @@ public static class NifMergeHarness
             }
             int body = Roles.Body(sidecar);
             Check(body >= 0 && sidecar.materials[body].role == "outfit", "outfit: the body is the dress's own body copy");
+            if (body >= 0) CheckSkinSpecular(mats[body], sidecar.materials[body], "outfit: dress's body copy");
             CheckModelSpaceNormals(smr, sidecar, mats, warnings);
 
             var baked = new Mesh();
@@ -370,8 +383,9 @@ public static class NifMergeHarness
             converted++;
             var bump = mats[slot].GetTexture("_BumpMap");
             string path = bump ? AssetDatabase.GetAssetPath(bump) : "";
-            Check(path.EndsWith("_unity_ts_n.png") && mats[slot].IsKeywordEnabled("_NORMALMAP"),
-                  $"{shape}: model-space map baked to tangent space (got '{path}')");
+            // Standard samples the map only with _NORMALMAP; the skin shader always samples it.
+            bool sampled = mats[slot].shader.name != "Standard" || mats[slot].IsKeywordEnabled("_NORMALMAP");
+            Check(path.EndsWith("_unity_ts_n.png") && sampled, $"{shape}: model-space map baked to tangent space (got '{path}')");
             var imp = AssetImporter.GetAtPath(path) as TextureImporter;
             Check(imp != null && imp.textureType == TextureImporterType.NormalMap, $"{shape}: baked map imported as a normal map");
             string key = entry.Texture(1).ToLowerInvariant();
@@ -442,6 +456,127 @@ public static class NifMergeHarness
     }
 
     // An assigned texture asset is the one a nif texture path names (relative to the textures root).
+    // Skin (SkinTint and FaceGen shader types) uses the package's Skyrim Skin shader, the rest Standard.
+    static string ExpectedShader(MaterialEntry e)
+    {
+        bool skin = e.shaderType == MaterialEntry.TypeSkinTint || e.shaderType == MaterialEntry.TypeFaceGen;
+        if (!skin) return "Standard";
+        return !e.AlphaTest && e.AlphaBlend ? "NifMerge/Skyrim Skin (Fade)" : "NifMerge/Skyrim Skin";
+    }
+
+    // A skin slot's specular inputs: the _s map (slot 7) as the mask, imported as data, and Skyrim's
+    // specular colour x strength and glossiness carried over unchanged.
+    static void CheckSkinSpecular(Material mat, MaterialEntry e, string what)
+    {
+        foreach (var name in new[] { "NifMerge/Skyrim Skin", "NifMerge/Skyrim Skin (Fade)" })
+        {
+            var sh = Shader.Find(name);
+            Check(sh != null && !ShaderUtil.ShaderHasError(sh), $"{what}: shader '{name}' compiles");
+        }
+        Check(mat.shader.name == "NifMerge/Skyrim Skin", $"{what}: uses the Skyrim Skin shader");
+        Check(e.modelSpaceNormals && !string.IsNullOrEmpty(e.Texture(7)), $"{what}: the sidecar names an _s map in slot 7");
+        Check(SameTexture(TexPath(mat, "_SpecMap"), e.Texture(7)), $"{what}: specular mask is the slot-7 _s map (got '{TexPath(mat, "_SpecMap")}')");
+        // The import setting itself: a Gamma project never creates sRGB formats, so the texture's format
+        // cannot tell. MeasureSkinSpecular checks the sampled value in Linear.
+        var mask = mat.GetTexture("_SpecMap") as Texture2D;
+        var maskImporter = mask ? AssetImporter.GetAtPath(AssetDatabase.GetAssetPath(mask)) : null;
+        bool data = maskImporter is TextureImporter ti ? !ti.sRGBTexture
+                  : maskImporter && new SerializedObject(maskImporter).FindProperty("m_sRGBTexture") is SerializedProperty p && !p.boolValue;
+        Check(data, $"{what}: specular mask imported without sRGB decoding");
+        Check(!mat.IsKeywordEnabled("_SPECMAP_ALPHA"), $"{what}: mask read from the red channel");
+        Color want = new Color(e.specularColor[0], e.specularColor[1], e.specularColor[2]) * e.specularStrength;
+        Color got = mat.GetColor("_SkyrimSpecColor");
+        Check((e.shaderFlags1 & 1) != 0 && Mathf.Abs(got.r - want.r) < 1e-4f && Mathf.Abs(got.g - want.g) < 1e-4f &&
+              Mathf.Abs(got.b - want.b) < 1e-4f, $"{what}: specular colour x strength {got} == {want}");
+        Check(Mathf.Abs(mat.GetFloat("_Shininess") - e.glossiness) < 1e-4f, $"{what}: glossiness {mat.GetFloat("_Shininess")} == {e.glossiness}");
+    }
+
+    // Renders a flat quad with the imported body material, the camera on the quad's normal, and checks the
+    // pixel against Skyrim's formula, linear in the light colour Lc:
+    //   diffuse  = albedo * N.L * Lc
+    //   specular = pow(N.H, glossiness) * specular colour x strength * mask * Lc
+    // Each light angle is rendered with and without specular; the difference is the specular term.
+    // Albedo and mask come from the textures' stored texels, so this also checks how each is decoded.
+    static void MeasureSkinSpecular(Material imported, MaterialEntry e)
+    {
+        var mat = new Material(imported);
+        mat.SetTexture("_BumpMap", null); // flat normal, so N.L and N.H are exact
+        var quad = GameObject.CreatePrimitive(PrimitiveType.Quad); // faces -Z
+        quad.GetComponent<MeshRenderer>().sharedMaterial = mat;
+        var at = new Vector3(0f, -50f, 0f); // away from the character, which stands at the origin
+        quad.transform.position = at;
+        var camGo = new GameObject("HarnessSpecCamera");
+        var lightGo = new GameObject("HarnessSpecLight");
+        var rt = new RenderTexture(16, 16, 24, RenderTextureFormat.ARGBFloat, RenderTextureReadWrite.Linear);
+        var saved = (RenderSettings.ambientMode, RenderSettings.ambientLight, RenderSettings.ambientProbe);
+        try
+        {
+            RenderSettings.ambientMode = UnityEngine.Rendering.AmbientMode.Flat;
+            RenderSettings.ambientLight = Color.black;
+            RenderSettings.ambientProbe = new UnityEngine.Rendering.SphericalHarmonicsL2();
+            var light = lightGo.AddComponent<Light>();
+            light.type = LightType.Directional;
+            light.intensity = 0.25f;
+            light.shadows = LightShadows.None;
+            var cam = camGo.AddComponent<Camera>();
+            cam.clearFlags = CameraClearFlags.SolidColor;
+            cam.backgroundColor = Color.black;
+            cam.fieldOfView = 10f;
+            cam.transform.position = at + new Vector3(0f, 0f, -2f);
+            cam.transform.LookAt(at);
+            cam.targetTexture = rt;
+
+            bool linear = QualitySettings.activeColorSpace == ColorSpace.Linear;
+            string space = linear ? "Linear" : "Gamma";
+            var diffuse = NifMergeMaterials.ReadRaw((Texture2D)mat.GetTexture("_MainTex"), out _, out _)[0];
+            var maskTexel = NifMergeMaterials.ReadRaw((Texture2D)mat.GetTexture("_SpecMap"), out _, out _)[0];
+            float albedo = linear ? Mathf.GammaToLinearSpace(diffuse.g / 255f) : diffuse.g / 255f;
+            float mask = maskTexel.r / 255f; // data: never decoded
+            Color specColor = mat.GetColor("_SkyrimSpecColor");
+
+            float Pixel(float angle, bool spec)
+            {
+                // The light travels along +Z rotated by angle about Y; the quad's normal is -Z.
+                lightGo.transform.rotation = Quaternion.Euler(0f, angle, 0f);
+                mat.SetColor("_SkyrimSpecColor", spec ? specColor : Color.black);
+                cam.Render();
+                var prev = RenderTexture.active;
+                RenderTexture.active = rt;
+                var tex = new Texture2D(rt.width, rt.height, TextureFormat.RGBAFloat, false, true);
+                tex.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0);
+                tex.Apply();
+                RenderTexture.active = prev;
+                float g = tex.GetPixel(rt.width / 2, rt.height / 2).g;
+                UnityEngine.Object.DestroyImmediate(tex);
+                return g;
+            }
+
+            float d0 = Pixel(0f, false), s0 = Pixel(0f, true) - d0;
+            float lc = d0 / albedo; // N.L = 1
+            float want0 = specColor.g * mask * lc; // N.H = 1
+            Lines.Add($"INFO skin specular ({space}): albedo {albedo:F4}, mask {mask:F4}, Lc {lc:F4}, diffuse {d0:F4}, specular {s0:F4}");
+            Check(lc > 0.01f && Mathf.Abs(s0 - want0) <= 0.03f * want0 + 1e-3f,
+                  $"skin specular ({space}) at N.H = 1: {s0:F4} == colour x strength x mask x Lc = {want0:F4}");
+            const float angle = 40f;
+            float d1 = Pixel(angle, false), s1 = Pixel(angle, true) - d1;
+            float wantD1 = albedo * lc * Mathf.Cos(angle * Mathf.Deg2Rad);
+            float wantS1 = want0 * Mathf.Pow(Mathf.Cos(angle * 0.5f * Mathf.Deg2Rad), e.glossiness);
+            Check(Mathf.Abs(d1 - wantD1) <= 0.03f * wantD1 + 1e-3f, $"skin diffuse ({space}) at N.L = cos {angle}: {d1:F4} == {wantD1:F4}");
+            Check(Mathf.Abs(s1 - wantS1) <= 0.03f * wantS1 + 1e-3f,
+                  $"skin specular ({space}) falls off as pow(N.H, {e.glossiness}): {s1:F4} == {wantS1:F4}");
+        }
+        finally
+        {
+            (RenderSettings.ambientMode, RenderSettings.ambientLight, RenderSettings.ambientProbe) = saved;
+            UnityEngine.Object.DestroyImmediate(quad);
+            UnityEngine.Object.DestroyImmediate(camGo);
+            UnityEngine.Object.DestroyImmediate(lightGo);
+            UnityEngine.Object.DestroyImmediate(mat);
+            rt.Release();
+            UnityEngine.Object.DestroyImmediate(rt);
+        }
+    }
+
     static bool SameTexture(string assetPath, string nifPath)
     {
         if (string.IsNullOrEmpty(assetPath) || string.IsNullOrEmpty(nifPath)) return false;
