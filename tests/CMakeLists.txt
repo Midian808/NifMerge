@@ -5,3 +5,6 @@ add_test(NAME core_tests COMMAND core_tests)
 
 add_executable(fbx_summary fbx_summary.cpp)
 target_link_libraries(fbx_summary PRIVATE fbxsdk)
+
+add_executable(gui_input gui_input.cpp)
+target_link_libraries(gui_input PRIVATE ole32 shell32 user32)

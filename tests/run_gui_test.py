@@ -5,9 +5,13 @@ first frame (the same StartRun the button calls). Then it checks that:
   * the GUI output is identical to the CLI output (FBX via fbx_summary, sidecar byte for byte), with the
     character wearing an outfit (dress, boots, thong) so the outfit list is part of the comparison,
   * a screenshot of the window after the run is saved (.tmp/guitest/gui_window.png),
+  * files dragged onto the window land in the section they are dropped on: the same character built
+    from real OLE drops (skeleton anywhere else, parts on Model parts, items on Outfit, the .tri folder
+    and a stray .nif on Facial morphs), then a real click on Go!, gives the CLI's output,
   * --exit-when-done returns 0 on success and 1 when the run fails.
 """
 import ctypes
+import json
 import os
 import subprocess
 import sys
@@ -19,6 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 BUILD = Path(os.environ.get("NIFMERGE_BUILD", ROOT / "build"))  # build tree to test
 EXE = BUILD / "Release" / "NifMerge.exe"
 SUMMARY = BUILD / "tests" / "Release" / "fbx_summary.exe"
+INPUT = BUILD / "tests" / "Release" / "gui_input.exe"
 S = ROOT / "samples"
 OUT = ROOT / ".tmp" / "guitest"
 PARTS = ["femalebody_0.nif", "femalehands_0.nif", "femalefeet_0.nif", "Head.nif"]
@@ -80,8 +85,64 @@ def screenshot(hwnd, path):
     subprocess.run(["powershell", "-NoProfile", "-Command", ps], check=True)
 
 
+def drop_run(cli_fbx):
+    """Builds the character by dragging files onto the window, then clicking Go!."""
+    out = OUT / "drop" / "Character.fbx"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    layout_file = OUT / "drop" / "layout.json"
+    for f in (out, out.with_name("Character.materials.json"), layout_file):
+        f.unlink(missing_ok=True)
+    proc = subprocess.Popen([str(EXE), "gui", "--weight", "50", "--out", str(out), "--write-layout", str(layout_file)])
+    deadline = time.time() + 30
+    while time.time() < deadline and not (layout_file.exists() and window_of(proc.pid)):
+        time.sleep(0.25)
+    hwnd = window_of(proc.pid)
+    check(bool(hwnd) and layout_file.exists(), "drop: GUI window open and its layout written")
+    if not hwnd or not layout_file.exists():
+        proc.kill()
+        return
+    time.sleep(0.5)
+    layout = json.loads(layout_file.read_text())
+    x = (layout["go"][0] + layout["go"][2]) // 2  # the lists span the window's width, as Go! does
+
+    def middle(section):
+        top, bottom = layout[section]
+        return (top + bottom) // 2
+
+    def drop(y, files, what):
+        r = subprocess.run([str(INPUT), "drop", str(hwnd), str(x), str(y)] + [str(f) for f in files],
+                           capture_output=True, text=True)
+        check(r.returncode == 0, f"drop: {what} dropped ({r.stderr.strip() or 'ok'})")
+        time.sleep(0.5)
+
+    # Outside every section (the skeleton field above the lists): sorted by type, so it is the skeleton.
+    drop(layout["parts"][0] - 10, [S / "skeleton_female.nif"], "the skeleton above the lists")
+    drop(middle("parts"), [S / p for p in PARTS], "the parts on Model parts")
+    drop(middle("outfit"), [S / p for p in OUTFIT], "the items on Outfit")
+    # A .nif on Facial morphs is not a morph source: it must be ignored, not added to the parts.
+    drop(middle("morphs"), [S / "trifiles", S / PARTS[0]], "the .tri folder and a stray .nif on Facial morphs")
+
+    go = layout["go"]
+    r = subprocess.run([str(INPUT), "click", str(hwnd), str((go[0] + go[2]) // 2), str((go[1] + go[3]) // 2)])
+    check(r.returncode == 0, "drop: Go! clicked")
+    sidecar = out.with_name("Character.materials.json")
+    deadline = time.time() + 120
+    while time.time() < deadline and not sidecar.exists():
+        time.sleep(0.25)
+    check(sidecar.exists(), "drop: Go! wrote the output")
+    time.sleep(1.0)
+    screenshot(hwnd, OUT / "gui_drop_window.png")
+    print("INFO screenshot", OUT / "gui_drop_window.png")
+    user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+    check(proc.wait(timeout=30) == 0, "drop: GUI closes cleanly")
+    if sidecar.exists():
+        check(summary(cli_fbx) == summary(out), "drop: FBX identical to the CLI's (each file in its section)")
+        check(cli_fbx.with_name("Character.materials.json").read_bytes() == sidecar.read_bytes(),
+              "drop: sidecar identical to the CLI's")
+
+
 def main():
-    for f in (EXE, SUMMARY):
+    for f in (EXE, SUMMARY, INPUT):
         if not f.exists():
             sys.exit(f"Build first: {f} missing")
     (OUT / "cli").mkdir(parents=True, exist_ok=True)
@@ -111,6 +172,8 @@ def main():
     check(summary(cli_fbx) == summary(gui_fbx), "GUI FBX identical to CLI FBX (canonical summary)")
     check(cli_fbx.with_name("Character.materials.json").read_bytes() == sidecar.read_bytes(),
           "GUI sidecar identical to CLI sidecar")
+
+    drop_run(cli_fbx)
 
     ok = subprocess.run([str(EXE), "gui"] + args_for(OUT / "gui" / "Again.fbx") + ["--go", "--exit-when-done"])
     check(ok.returncode == 0, "--exit-when-done: exit code 0 after a successful run")

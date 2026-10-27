@@ -10,6 +10,9 @@ Research, design decisions and open items: [docs/DEV_PLAN.md](docs/DEV_PLAN.md).
 ## Using it
 
 1. Run `build\Release\NifMerge.exe` (or drag `.nif` / `.tri` files onto it).
+   Files dragged onto the open window go to the list they are dropped on (Model parts, Outfit or
+   Facial morphs). Dropped anywhere else, they are sorted by type: a skeleton to the skeleton field,
+   other `.nif` files to the parts, `.tri` files and folders to the facial morphs.
 2. Pick the skeleton (e.g. XPMSE `skeleton_female.nif`) and add the part NIFs. Listing either file of
    a `_0`/`_1` pair is enough, because the partner is found automatically.
 3. Optionally add clothing or armour under *Outfit*, and facial morph files (`.tri`), or whole
@@ -93,8 +96,10 @@ render front faces only.
 NifMerge merge --skeleton <skeleton.nif> --part <part.nif> [--part ...] [--wear <item.nif> ...]
                [--weight 0..100] [--tri <file.tri | folder> ...] --out <model.fbx> [--obj <debug.obj>]
 NifMerge inspect <file.nif> [--skeleton <skeleton.nif>]
-NifMerge gui [same options as merge] [--go] [--exit-when-done]
+NifMerge gui [same options as merge] [--go] [--exit-when-done] [--write-layout <file>]
 ```
+
+`--write-layout` is for the GUI test: it writes where the drop sections and Go! are, in window pixels.
 
 `inspect --skeleton` prints, for each skinned shape, the skin→world transform each of its bones
 implies. When every bone agrees, the shape is bound consistently to that skeleton.
@@ -117,7 +122,7 @@ Set `NIFMERGE_BUILD=<build dir>` to point the Python tests at a build tree other
 | Command | What it covers |
 |---|---|
 | `build\tests\Release\core_tests.exe` | Re-pose vs. an independent evaluation of the game's skinning formula (nifly math) on every sample and fixture; FaceGen part placement; weight blending; seam-continuous normals; merge invariants; FBX read-back (geometry, materials, bind pose = rest pose); TRI decoding; morph-to-part matching decisions; exact reproduction of matched morphs; surface transfer (left/right consistency against the source masks' own, locality); blend shapes surviving the FBX round trip; outfit: each sample item replacing or adding exactly what its slots say, the head's eyes, mouth and brows kept, everything left visible unchanged, seam-continuous normals when dressed, two items in one slot rejected, and (with nifly-written stand-ins) a helmet hiding only the hair and per-partition hiding of a body split into two slots. |
-| `python tests\run_gui_test.py` | Drives the real GUI (`gui --go`, the character wearing the sample outfit) and checks its output is identical to the CLI's, plus exit codes and a window screenshot. |
+| `python tests\run_gui_test.py` | Drives the real GUI (`gui --go`, the character wearing the sample outfit) and checks its output is identical to the CLI's, plus exit codes and a window screenshot. Then builds the same character by real drag and drop (`gui_input`: OLE drags, as from Explorer, onto each section, and a real click on Go!) and checks that output is identical too, which only holds if every file landed in the section it was dropped on. It moves the mouse, so leave it alone while it runs. |
 | `python tests\run_unity_harness.py` | Batch-mode Unity (6000.0 and 2022.3): automatic import → valid Humanoid avatar, every bone mapping, 12 Standard materials, texture resolution, normal-map conversion, model-space → tangent-space bake of the user's real `_msn` maps (round-trip, agreement with Unity's mesh normals, no added seams), orientation/scale, bind-pose skinning, T-pose reference, retargeting vs. a canonical T-pose rig, blend shapes (all imported, at rest when zeroed, blinks on the correct side, `Aah` opens the mouth, head-only), screenshots including face close-ups. A second model wears the sample outfit: Humanoid, the replaced parts absent, every material built, the items' normal maps converted and alpha modes set, the dress's body copy baked from its `_msn` map. |
 
 The tests need two sets of Skyrim assets, and neither is committed, because the repository may not

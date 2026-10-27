@@ -11,6 +11,7 @@ struct GuiInit {
 	float weight = 50.0f;
 	bool go = false;           // press Go! on the first frame
 	bool exitWhenDone = false; // close the window when that run finishes; exit code 1 if it failed
+	std::string layoutFile;    // for the GUI test: where the drop sections and Go! are, in client pixels
 };
 
 // Opens the Dear ImGui window and runs until it is closed. Returns the process exit code.

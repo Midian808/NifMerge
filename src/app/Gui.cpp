@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <atomic>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -163,6 +164,61 @@ void AddOutfitFiles(const std::vector<std::string>& files) {
 	}
 }
 
+// The list sections files can be dropped on. Each is a horizontal band of the window, from its title
+// to the next section's title, recorded while drawing (client pixels).
+enum class Section { Parts, Outfit, Morphs };
+
+struct SectionBand {
+	Section section;
+	float top, bottom;
+};
+
+std::vector<SectionBand> g_sections;
+float g_goRect[4] = {}; // Go! button: x0, y0, x1, y1
+
+// Files dropped on a section go to that list; dropped anywhere else, they are sorted by type.
+void AddDroppedFiles(const std::vector<std::string>& files, POINT at) {
+	const SectionBand* band = nullptr;
+	for (const auto& b : g_sections)
+		if (at.y >= b.top && at.y < b.bottom) band = &b;
+	if (!band || band->section == Section::Parts) {
+		AddFiles(files);
+		return;
+	}
+	if (band->section == Section::Outfit) {
+		AddOutfitFiles(files);
+		return;
+	}
+	for (const auto& f : files) {
+		std::string ext = fs::u8path(f).extension().u8string();
+		for (auto& c : ext) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+		if (ext == ".tri" || fs::is_directory(fs::u8path(f))) AddMorphPath(f);
+		else g_app.Log(nm::LogLevel::Warning, "Ignored (not a .tri file or a folder): " + f);
+	}
+}
+
+// For the GUI test: writes the drop sections and the Go! button, in client pixels, whenever they move.
+void WriteLayout(const std::string& path) {
+	static std::string written;
+	auto f = [](float v) { return std::to_string(static_cast<int>(v)); };
+	std::string json = "{";
+	for (const auto& b : g_sections) {
+		const char* name = b.section == Section::Parts ? "parts" : b.section == Section::Outfit ? "outfit" : "morphs";
+		json += std::string("\"") + name + "\": [" + f(b.top) + ", " + f(b.bottom) + "], ";
+	}
+	json += "\"go\": [" + f(g_goRect[0]) + ", " + f(g_goRect[1]) + ", " + f(g_goRect[2]) + ", " + f(g_goRect[3]) + "]}\n";
+	if (json == written) return;
+	const fs::path target = fs::u8path(path), temp = fs::u8path(path + ".tmp");
+	{
+		std::ofstream out(temp, std::ios::binary);
+		out << json;
+		if (!out) return;
+	}
+	std::error_code ec;
+	fs::rename(temp, target, ec);
+	if (!ec) written = json;
+}
+
 // One line per outfit item saying what it replaces, read from the files' body slots. Recomputed only
 // when the parts or the outfit change.
 void UpdateOutfitLines() {
@@ -295,9 +351,13 @@ void DrawUi(HWND hwnd) {
 		if (!f.empty()) g_app.skeleton = f[0];
 	}
 
+	const float partsTop = ImGui::GetCursorScreenPos().y;
 	ImGui::SeparatorText("Model parts");
+	ImGui::PushTextWrapPos(0.0f);
 	ImGui::TextDisabled("Body, hands, feet, head / FaceGen head, hair... _0/_1 weight files pair automatically. "
-						"You can also drag .nif and .tri files, or folders of .tri files, onto this window.");
+						"You can also drag files onto this window: onto a list to add them to it, anywhere else "
+						"to sort them (.nif to the parts, .tri files and folders to the facial morphs).");
+	ImGui::PopTextWrapPos();
 	auto parts = nm::PairPartFiles(g_app.partFiles);
 	const float listH = ImGui::GetTextLineHeightWithSpacing() * 8;
 	if (ImGui::BeginListBox("##parts", ImVec2(-FLT_MIN, listH))) {
@@ -331,6 +391,7 @@ void DrawUi(HWND hwnd) {
 		g_app.selectedPart = -1;
 	}
 
+	const float outfitTop = ImGui::GetCursorScreenPos().y;
 	ImGui::SeparatorText("Outfit (optional)");
 	ImGui::TextDisabled("Clothing and armour the character wears. Each item replaces the character's parts in the body "
 						"slots it takes (a dress replaces the body, boots the feet); other items are added on top.");
@@ -373,6 +434,7 @@ void DrawUi(HWND hwnd) {
 		g_app.selectedOutfit = -1;
 	}
 
+	const float morphsTop = ImGui::GetCursorScreenPos().y;
 	ImGui::SeparatorText("Facial morphs (.tri, optional)");
 	ImGui::TextDisabled("Expression, phoneme, blink and eye-look morphs become blend shapes. Add .tri files or whole "
 						"folders: each file is matched to a head part by its geometry, and the log shows the decisions.");
@@ -402,6 +464,11 @@ void DrawUi(HWND hwnd) {
 		g_app.selectedMorph = -1;
 	}
 
+	const float weightTop = ImGui::GetCursorScreenPos().y;
+	g_sections = {{Section::Parts, partsTop, outfitTop},
+				  {Section::Outfit, outfitTop, morphsTop},
+				  {Section::Morphs, morphsTop, weightTop}};
+
 	ImGui::SeparatorText("Body weight");
 	ImGui::SetNextItemWidth(-FLT_MIN);
 	ImGui::SliderFloat("##weight", &g_app.weight, 0.0f, 100.0f, "%.0f");
@@ -424,6 +491,8 @@ void DrawUi(HWND hwnd) {
 	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.22f, 0.65f, 0.30f, 1));
 	ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.45f, 0.20f, 1));
 	if (ImGui::Button(busy ? "Working..." : "Go!", ImVec2(-FLT_MIN, ImGui::GetFrameHeight() * 2))) StartRun();
+	const ImVec2 goMin = ImGui::GetItemRectMin(), goMax = ImGui::GetItemRectMax();
+	g_goRect[0] = goMin.x, g_goRect[1] = goMin.y, g_goRect[2] = goMax.x, g_goRect[3] = goMax.y;
 	ImGui::PopStyleColor(3);
 	ImGui::EndDisabled();
 
@@ -459,13 +528,15 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 		case WM_DROPFILES: {
 			HDROP drop = reinterpret_cast<HDROP>(wParam);
 			if (!g_app.running) {
+				POINT at{};
+				DragQueryPoint(drop, &at);
 				UINT n = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
 				std::vector<std::string> files;
 				for (UINT i = 0; i < n; i++) {
 					wchar_t buf[MAX_PATH * 4];
 					if (DragQueryFileW(drop, i, buf, static_cast<UINT>(std::size(buf)))) files.push_back(nm::ToUtf8(buf));
 				}
-				AddFiles(files);
+				AddDroppedFiles(files, at);
 			}
 			DragFinish(drop);
 			return 0;
@@ -491,9 +562,16 @@ int RunGui(const GuiInit& init) {
 					  nullptr, L"NifMergeWindow", nullptr};
 	wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
 	RegisterClassExW(&wc);
+	// Tall enough for every section, Go! and some log; shrunk and moved up to fit the screen above the taskbar.
+	MONITORINFO mon = {sizeof(mon)};
+	GetMonitorInfoW(MonitorFromPoint(POINT{100, 100}, MONITOR_DEFAULTTOPRIMARY), &mon);
+	const RECT& work = mon.rcWork;
+	const int winW = std::min(static_cast<int>(820 * dpi), static_cast<int>(work.right - work.left));
+	const int winH = std::min(static_cast<int>(1200 * dpi), static_cast<int>(work.bottom - work.top));
+	const int winX = std::max(static_cast<int>(work.left), std::min(static_cast<int>(work.left) + 100, static_cast<int>(work.right) - winW));
+	const int winY = std::max(static_cast<int>(work.top), std::min(static_cast<int>(work.top) + 100, static_cast<int>(work.bottom) - winH));
 	HWND hwnd = CreateWindowW(wc.lpszClassName, L"NifMerge - Skyrim NIF to Unity Humanoid FBX", WS_OVERLAPPEDWINDOW,
-							  100, 100, static_cast<int>(820 * dpi), static_cast<int>(900 * dpi), nullptr, nullptr,
-							  wc.hInstance, nullptr);
+							  winX, winY, winW, winH, nullptr, nullptr, wc.hInstance, nullptr);
 	if (!CreateDevice(hwnd)) {
 		CleanupDevice();
 		UnregisterClassW(wc.lpszClassName, wc.hInstance);
@@ -545,6 +623,7 @@ int RunGui(const GuiInit& init) {
 		ImGui_ImplWin32_NewFrame();
 		ImGui::NewFrame();
 		DrawUi(hwnd);
+		if (!init.layoutFile.empty()) WriteLayout(init.layoutFile);
 		if (autorun) {
 			autorun = false;
 			StartRun();

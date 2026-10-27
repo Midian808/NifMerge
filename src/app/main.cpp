@@ -107,6 +107,7 @@ GuiInit ParseGuiArgs(const std::vector<std::string>& args) {
 		else if (a == "--weight") init.weight = std::stof(value());
 		else if (a == "--go") init.go = true;
 		else if (a == "--exit-when-done") init.exitWhenDone = true;
+		else if (a == "--write-layout") init.layoutFile = value();
 		else throw nm::Error("Unknown option: " + a);
 	}
 	return init;
