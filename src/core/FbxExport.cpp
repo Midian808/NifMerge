@@ -154,6 +154,26 @@ void WriteFbx(const MergedModel& m, const std::string& fbxPath, const LogFn& log
 		}
 	mesh->AddDeformer(skin);
 
+	// Facial morphs: one channel per blend shape. Each shape holds a position for every mesh vertex
+	// (the base position where the morph does not act); the SDK's sparse-index form does not round-trip.
+	if (!m.blendShapes.empty()) {
+		FbxBlendShape* blend = FbxBlendShape::Create(scene, (meshName + "_Morphs").c_str());
+		for (const BlendShape& b : m.blendShapes) {
+			FbxBlendShapeChannel* channel = FbxBlendShapeChannel::Create(scene, b.name.c_str());
+			FbxShape* shape = FbxShape::Create(scene, b.name.c_str());
+			shape->InitControlPoints(nv);
+			FbxVector4* sp = shape->GetControlPoints();
+			for (int v = 0; v < nv; v++) sp[v] = cp[v];
+			for (size_t i = 0; i < b.vertices.size(); i++) {
+				Vec3 p = ToFbxPoint(m.positions[b.vertices[i]] + b.deltas[i]);
+				sp[b.vertices[i]] = FbxVector4(p.x, p.y, p.z, 0.0);
+			}
+			channel->AddTargetShape(shape, 100.0);
+			blend->AddBlendShapeChannel(channel);
+		}
+		mesh->AddDeformer(blend);
+	}
+
 	FbxPose* pose = FbxPose::Create(scene, "BindPose");
 	pose->SetIsBindPose(true);
 	pose->Add(meshNode, FbxMatrix(meshGlobal));
@@ -169,7 +189,8 @@ void WriteFbx(const MergedModel& m, const std::string& fbxPath, const LogFn& log
 	exporter->Destroy();
 
 	log(LogLevel::Info, "Wrote " + fbxPath + " (" + std::to_string(m.materials.size()) + " materials, " +
-							std::to_string(clusterCount) + " skinned bones of " + std::to_string(m.bones.size()) + ")");
+							std::to_string(clusterCount) + " skinned bones of " + std::to_string(m.bones.size()) + ", " +
+							std::to_string(m.blendShapes.size()) + " blend shapes)");
 }
 
 } // namespace nm

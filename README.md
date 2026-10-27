@@ -9,13 +9,33 @@ Research, design decisions and open items: [docs/DEV_PLAN.md](docs/DEV_PLAN.md).
 
 ## Using it
 
-1. Run `build\Release\NifMerge.exe` (or drag `.nif` files onto it).
+1. Run `build\Release\NifMerge.exe` (or drag `.nif` / `.tri` files onto it).
 2. Pick the skeleton (e.g. XPMSE `skeleton_female.nif`) and add the part NIFs. Listing either file of
    a `_0`/`_1` pair is enough, because the partner is found automatically.
-3. Set the body weight (0 = `_0`, 100 = `_1`), choose the output `.fbx`, press **Go!**
+3. Optionally add facial morph files (`.tri`), or whole folders of them, under *Facial morphs*.
+4. Set the body weight (0 = `_0`, 100 = `_1`), choose the output `.fbx`, press **Go!**
 
-Output: `<name>.fbx` plus `<name>.materials.json` (texture paths, shader settings, Humanoid map).
-Copy both into your Unity project.
+Output: `<name>.fbx` plus `<name>.materials.json` (texture paths, shader settings, Humanoid map,
+blend-shape list). Copy both into your Unity project.
+
+### Facial morphs
+
+Skyrim animates faces with morph targets stored in `.tri` files next to the head-part meshes:
+phonemes for lip-sync, expressions, blinks, brow movement and eye looks. NifMerge turns each morph
+into a blend shape on the merged mesh (e.g. `Aah`, `BlinkLeft`, `MoodHappy`, `LookLeft`). A name
+used by several parts becomes one blend shape that moves them all.
+
+Point it at the expression `.tri` files for your head parts. A folder of mixed files is fine: each
+file is matched to a head part by its geometry, and the log (and `morphSources` in the sidecar) says
+what was applied where and why the rest were not:
+- **index**: same vertex count as a part, vertex for vertex (e.g. a mouth);
+- **window**: a run of a part's vertices (e.g. one eye of a two-eye mesh);
+- **surface**: a lower-resolution mask lying on a part's surface (e.g. High Poly Head face masks),
+  transferred through the nearest mask triangle and fading out at its edge.
+
+Files for a different head (another sex, another head mesh) fail the fit and are skipped.
+Same-named files in different folders are alternatives, and the stronger, denser match wins.
+Character-creation (`chargen`) morphs are not needed: a FaceGen head already has them baked in.
 
 ### Unity side
 
@@ -44,7 +64,8 @@ render front faces only.
 ### Command line
 
 ```
-NifMerge merge --skeleton <skeleton.nif> --part <part.nif> [--part ...] [--weight 0..100] --out <model.fbx> [--obj <debug.obj>]
+NifMerge merge --skeleton <skeleton.nif> --part <part.nif> [--part ...] [--weight 0..100]
+               [--tri <file.tri | folder> ...] --out <model.fbx> [--obj <debug.obj>]
 NifMerge inspect <file.nif> [--skeleton <skeleton.nif>]
 NifMerge gui [same options as merge] [--go] [--exit-when-done]
 ```
@@ -69,9 +90,9 @@ Set `NIFMERGE_BUILD=<build dir>` to point the Python tests at a build tree other
 
 | Command | What it covers |
 |---|---|
-| `build\tests\Release\core_tests.exe` | Re-pose vs. an independent evaluation of the game's skinning formula (nifly math) on every sample and fixture; FaceGen part placement; weight blending; seam-continuous normals; merge invariants; FBX read-back (geometry, materials, bind pose = rest pose). |
+| `build\tests\Release\core_tests.exe` | Re-pose vs. an independent evaluation of the game's skinning formula (nifly math) on every sample and fixture; FaceGen part placement; weight blending; seam-continuous normals; merge invariants; FBX read-back (geometry, materials, bind pose = rest pose); TRI decoding; morph-to-part matching decisions; exact reproduction of matched morphs; surface transfer (left/right consistency against the source masks' own, locality); blend shapes surviving the FBX round trip. |
 | `python tests\run_gui_test.py` | Drives the real GUI (`gui --go`) and checks its output is identical to the CLI's, plus exit codes and a window screenshot. |
-| `python tests\run_unity_harness.py` | Batch-mode Unity (6000.0 and 2022.3): automatic import → valid Humanoid avatar, every bone mapping, 12 Standard materials, texture resolution, normal-map conversion, model-space → tangent-space bake of the user's real `_msn` maps (round-trip, agreement with Unity's mesh normals, no added seams), orientation/scale, bind-pose skinning, T-pose reference, retargeting vs. a canonical T-pose rig, screenshots. |
+| `python tests\run_unity_harness.py` | Batch-mode Unity (6000.0 and 2022.3): automatic import → valid Humanoid avatar, every bone mapping, 12 Standard materials, texture resolution, normal-map conversion, model-space → tangent-space bake of the user's real `_msn` maps (round-trip, agreement with Unity's mesh normals, no added seams), orientation/scale, bind-pose skinning, T-pose reference, retargeting vs. a canonical T-pose rig, blend shapes (all imported, at rest when zeroed, blinks on the correct side, `Aah` opens the mouth, head-only), screenshots including face close-ups. |
 
 The tests need two sets of Skyrim assets, and neither is committed, because the repository may not
 redistribute them. A missing fixture fails the tests.
@@ -79,8 +100,9 @@ redistribute them. A missing fixture fails the tests.
 - `tests/fixtures/pynifly/`: run `python tests\fetch_fixtures.py` once. It downloads them from
   PyNifly's public repository at a pinned commit and verifies their SHA-256 hashes.
 - `samples/`: your own Skyrim SE set: `skeleton_female.nif` (XPMSE), `femalebody_0/1.nif`,
-  `femalehands_0/1.nif`, `femalefeet_0/1.nif`, `Head.nif`, and the `_msn` maps
-  `femalebody_1_msn.dds`, `femalehands_1_msn.dds`, `femalehead_msn.dds`.
+  `femalehands_0/1.nif`, `femalefeet_0/1.nif`, `Head.nif`, the `_msn` maps
+  `femalebody_1_msn.dds`, `femalehands_1_msn.dds`, `femalehead_msn.dds`, and `trifiles/`: expression
+  `.tri` files for the head parts (female and male, vanilla and in `trifiles/HPH` High Poly Head).
 
 ## Third-party code
 

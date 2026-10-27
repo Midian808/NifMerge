@@ -13,6 +13,7 @@ namespace NifMerge
         public string fbx;
         public float metresPerGameUnit;
         public HumanoidEntry[] humanoid;
+        public string[] blendShapes; // facial morph names, as imported onto the mesh
         public MaterialEntry[] materials;
 
         public const string Generator = "NifMerge";

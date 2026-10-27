@@ -149,6 +149,7 @@ public static class NifMergeHarness
             UnityEngine.Object.DestroyImmediate(baked);
 
             Render(go, Path.Combine(outDir, "bind_pose.png"));
+            CheckFacialMorphs(go, smr, sidecar, outDir);
 
             // ---- The avatar's reference skeleton is a T-pose (arms out along X, legs straight down).
             var hd = importer.humanDescription;
@@ -460,7 +461,104 @@ public static class NifMergeHarness
 
     // Renders the current pose. The skinned mesh is baked into a static snapshot first: edit-mode
     // batch rendering does not re-skin a SkinnedMeshRenderer when its bones move.
+    // Facial morphs (.tri) imported as blend shapes: present by name, confined to the head, and moving
+    // the way their names say. Face close-ups are rendered for a look.
+    static void CheckFacialMorphs(GameObject go, SkinnedMeshRenderer smr, Sidecar sidecar, string outDir)
+    {
+        var mesh = smr.sharedMesh;
+        var names = sidecar.blendShapes ?? new string[0];
+        Check(names.Length > 0, $"sidecar lists {names.Length} blend shapes");
+        Check(mesh.blendShapeCount == names.Length, $"{mesh.blendShapeCount} blend shapes imported, sidecar lists {names.Length}");
+        foreach (var n in names) Check(mesh.GetBlendShapeIndex(n) >= 0, $"blend shape '{n}' imported");
+        if (mesh.blendShapeCount == 0) return;
+
+        // Submesh of each vertex, to tell which parts a morph moves.
+        var slotOf = new int[mesh.vertexCount];
+        for (int sm = 0; sm < mesh.subMeshCount; sm++)
+            foreach (int v in mesh.GetIndices(sm)) slotOf[v] = sm;
+        bool IsHeadPart(int slot)
+        {
+            var e = sidecar.materials[slot];
+            return e.sourceFile.ToLowerInvariant() == sidecar.materials[Roles.Head(sidecar)].sourceFile.ToLowerInvariant();
+        }
+
+        var rest = mesh.vertices;
+        Vector3[] Posed(string morph, float weight)
+        {
+            for (int i = 0; i < mesh.blendShapeCount; i++) smr.SetBlendShapeWeight(i, 0f);
+            if (morph != null) smr.SetBlendShapeWeight(mesh.GetBlendShapeIndex(morph), weight);
+            var baked = new Mesh();
+            smr.BakeMesh(baked);
+            var v = baked.vertices;
+            UnityEngine.Object.DestroyImmediate(baked);
+            return v;
+        }
+        var neutral = Posed(null, 0f);
+        float worstRest = 0;
+        for (int i = 0; i < rest.Length; i++) worstRest = Mathf.Max(worstRest, (neutral[i] - rest[i]).magnitude);
+        Check(worstRest < 1e-4f, $"all morphs at 0 leave the mesh at rest (max {worstRest:G3} m)");
+
+        (int vertex, Vector3 delta, bool onlyHead) Peak(string morph)
+        {
+            var p = Posed(morph, 100f);
+            int best = -1;
+            float bestLen = 0;
+            bool onlyHead = true;
+            for (int i = 0; i < p.Length; i++)
+            {
+                float len = (p[i] - neutral[i]).magnitude;
+                if (len > 1e-5f && !IsHeadPart(slotOf[i])) onlyHead = false;
+                if (len > bestLen) bestLen = len; else continue;
+                best = i;
+            }
+            return (best, best >= 0 ? p[best] - neutral[best] : Vector3.zero, onlyHead);
+        }
+        foreach (var (morph, side) in new[] { ("BlinkLeft", -1f), ("BlinkRight", 1f) })
+        {
+            if (mesh.GetBlendShapeIndex(morph) < 0) continue;
+            var (v, d, onlyHead) = Peak(morph);
+            Check(v >= 0 && d.magnitude > 0.002f, $"{morph} moves the mesh (peak {d.magnitude * 1000:F1} mm)");
+            if (v < 0) continue;
+            // Unity: the character faces +Z, so its left is -X.
+            Check(neutral[v].x * side > 0.005f && d.y < 0f, $"{morph}: peak on the character's {(side < 0 ? "left" : "right")} and moving down " +
+                  $"(x {neutral[v].x:F3}, dy {d.y * 1000:F1} mm)");
+            Check(onlyHead, $"{morph} moves only head parts");
+        }
+        if (mesh.GetBlendShapeIndex("Aah") >= 0)
+        {
+            var (v, d, onlyHead) = Peak("Aah");
+            var eyes = Array.FindIndex(sidecar.materials, mm => mm.shape.Contains("Eyes"));
+            Vector3 eyeCentre = SubmeshCentroid(mesh, eyes);
+            Check(v >= 0 && d.y < -0.003f && neutral[v].y < eyeCentre.y - 0.03f,
+                  $"Aah opens the mouth: peak below the eyes moving down ({d.y * 1000:F1} mm)");
+            Check(onlyHead, "Aah moves only head parts");
+        }
+
+        RenderFace(go, smr, Path.Combine(outDir, "face_neutral.png"), null);
+        RenderFace(go, smr, Path.Combine(outDir, "face_aah.png"), new[] { "Aah" });
+        RenderFace(go, smr, Path.Combine(outDir, "face_blink.png"), new[] { "BlinkLeft", "BlinkRight" });
+        RenderFace(go, smr, Path.Combine(outDir, "face_happy.png"), new[] { "MoodHappy" });
+        for (int i = 0; i < mesh.blendShapeCount; i++) smr.SetBlendShapeWeight(i, 0f);
+    }
+
+    static void RenderFace(GameObject go, SkinnedMeshRenderer smr, string path, string[] morphs)
+    {
+        for (int i = 0; i < smr.sharedMesh.blendShapeCount; i++) smr.SetBlendShapeWeight(i, 0f);
+        foreach (var m in morphs ?? new string[0])
+        {
+            int i = smr.sharedMesh.GetBlendShapeIndex(m);
+            if (i >= 0) smr.SetBlendShapeWeight(i, 100f);
+        }
+        var head = go.GetComponent<Animator>().GetBoneTransform(HumanBodyBones.Head).position + new Vector3(0f, 0.02f, 0f);
+        Render(go, path, head + new Vector3(0f, 0f, 0.6f), head, 24f, 768, 768);
+    }
+
     static void Render(GameObject go, string path)
+    {
+        Render(go, path, new Vector3(0f, 0.95f, 4.6f), new Vector3(0f, 0.92f, 0f), 30f, 768, 1024);
+    }
+
+    static void Render(GameObject go, string path, Vector3 camPos, Vector3 target, float fov, int width, int height)
     {
         EditorSettings.asyncShaderCompilation = false;
         var smr = go.GetComponentInChildren<SkinnedMeshRenderer>();
@@ -473,7 +571,7 @@ public static class NifMergeHarness
         smr.enabled = false;
         var camGo = new GameObject("HarnessCamera");
         var lightGo = new GameObject("HarnessLight");
-        var rt = new RenderTexture(768, 1024, 24, RenderTextureFormat.ARGB32);
+        var rt = new RenderTexture(width, height, 24, RenderTextureFormat.ARGB32);
         try
         {
             var light = lightGo.AddComponent<Light>();
@@ -485,9 +583,9 @@ public static class NifMergeHarness
             var cam = camGo.AddComponent<Camera>();
             cam.clearFlags = CameraClearFlags.SolidColor;
             cam.backgroundColor = new Color(0.22f, 0.23f, 0.26f);
-            cam.fieldOfView = 30f;
-            cam.transform.position = new Vector3(0f, 0.95f, 4.6f); // in front: the character faces +Z
-            cam.transform.LookAt(new Vector3(0f, 0.92f, 0f));
+            cam.fieldOfView = fov;
+            cam.transform.position = camPos; // in front: the character faces +Z
+            cam.transform.LookAt(target);
             cam.targetTexture = rt;
             cam.Render();
 

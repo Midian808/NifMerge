@@ -88,7 +88,8 @@ struct PartInput {
 struct MergeRequest {
 	std::string skeletonPath;
 	std::vector<PartInput> parts;
-	double weight = 50.0; // Skyrim NPC weight, 0..100
+	double weight = 50.0;               // Skyrim NPC weight, 0..100
+	std::vector<std::string> morphPaths; // .tri files or folders of them (searched recursively)
 };
 
 struct OutBone {
@@ -97,6 +98,23 @@ struct OutBone {
 	Xform world;        // rigid (scale-free) rest transform, game units
 	int skeletonIndex = -1;
 	std::string humanoid; // Unity HumanBodyBones name, or empty
+};
+
+// A facial morph as Unity will see it: one blend shape, possibly spanning several head parts.
+struct BlendShape {
+	std::string name;
+	std::vector<uint32_t> vertices; // merged-mesh vertex indices with a non-zero offset, ascending
+	std::vector<Vec3> deltas;       // rest-pose offsets, game units, Skyrim axes
+};
+
+// What happened to one .tri file: applied to a shape, superseded, or rejected.
+struct MorphSource {
+	std::string file;
+	std::string shape;   // material slot name, empty when not applied
+	std::string mode;    // "index", "window", "surface", or empty
+	uint32_t windowStart = 0;
+	double median = 0, p90 = 0, max = 0; // fit distances, game units
+	std::string outcome; // "applied", or why not
 };
 
 struct MergedModel {
@@ -109,6 +127,9 @@ struct MergedModel {
 	std::vector<std::array<uint32_t, 3>> tris;
 	std::vector<int> triMaterial;
 	std::vector<VertexWeights> weights; // bone indices into bones
+	std::vector<std::pair<uint32_t, uint32_t>> materialVertices; // per slot: first vertex, vertex count
+	std::vector<BlendShape> blendShapes;
+	std::vector<MorphSource> morphSources;
 };
 
 } // namespace nm

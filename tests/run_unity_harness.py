@@ -81,8 +81,10 @@ def harness(unity: Path) -> bool:
     work = ROOT / ".tmp" / "unity" / version
     project = work / "Project"
     out = work / "out"
-    shutil.rmtree(out, ignore_errors=True)
-    out.mkdir(parents=True)
+    out.mkdir(parents=True, exist_ok=True)
+    for old in out.iterdir():  # clear the previous run's results (the folder itself may be in use)
+        if old.is_file():
+            old.unlink()
 
     if not (project / "ProjectSettings").exists():
         with open(work / "create.log", "w") as log:
@@ -107,7 +109,8 @@ def harness(unity: Path) -> bool:
 
     fbx = assets / "NifMergeTest" / "Character.fbx"
     parts = ["femalebody_0.nif", "femalehands_0.nif", "femalefeet_0.nif", "Head.nif"]
-    cmd = [NIFMERGE, "merge", "--skeleton", SAMPLES / "skeleton_female.nif", "--weight", "50", "--out", fbx]
+    cmd = [NIFMERGE, "merge", "--skeleton", SAMPLES / "skeleton_female.nif", "--weight", "50",
+           "--tri", SAMPLES / "trifiles", "--out", fbx]
     for p in parts:
         cmd += ["--part", SAMPLES / p]
     if run(cmd) != 0:

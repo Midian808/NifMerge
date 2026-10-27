@@ -235,6 +235,71 @@ built around. glTF imports through packages that do not support Humanoid avatar 
   `_0`/`_1`, hands, feet, an in-game FaceGen head, the skeleton), because the FaceGen offset bug is the
   thing this tool exists to fix.
 
+### 2.2 Facial morphs (built)
+
+Skyrim animates faces with per-head-part morph files (`.tri`, `FRTRI003`), not bones: the only face
+node in the skeletons is `NPCEyeBone`, and the FaceGen head NIF references no `.tri` (the plugin's
+head-part records do). Expression `.tri` files hold phonemes, expressions, blinks, brow movement and
+eye looks. Chargen morphs are already baked into a FaceGen head.
+
+**Reading.** `Tri.cpp` decodes difference morphs (scaled int16 offsets) and modifier morphs (absolute
+positions turned into offsets), rejecting truncated or over-long files.
+
+**Matching** (`Morphs.cpp`). A TRI's base mesh is compared with each material slot in the rest pose
+(rest = skinToRest * tri + t):
+- index: same vertex count, t = mean offset;
+- window: fewer vertices, a contiguous run of the slot's vertices;
+- surface: a lower-resolution mask on the slot's surface.
+
+Acceptance limits (game units): median ≤ 0.35 and p90 ≤ 0.6 for all modes, plus max ≤ 1.2 (index,
+window) or ≤ 0.8 (surface). Priority is index > window > surface. Same-named files are alternatives:
+the stronger mode wins, then the denser mesh. Per slot there is one index source, windows do not
+overlap, a slot with an exact source takes no surface mask, and overlapping masks keep the better
+fit.
+
+**One TRI space per head.** All of a head's TRIs share one origin, the median offset of the exact
+matches. Surface masks are placed there rather than fitting their own offset: a free fit slides a
+mask along the curved face until even another head's mask passes. Measured: the male masks fitted
+freely reached median 0.11; at the shared origin they score 0.46–0.49 and are rejected. Only when no
+TRI matches exactly is a mask's offset fitted (with a warning).
+
+Decisions on the user's set (`samples/trifiles`, origin (0.00, −2.03, 120.17)):
+
+| File | Slot | Mode | median / p90 / max |
+|---|---|---|---|
+| `MouthHumanF.tri` | mouth | index | 0.228 / 0.486 / 0.984 |
+| `EyesFemaleLeft.tri` | eyes 0–87 | window | 0.106 / 0.374 / 0.893 |
+| `EyesFemaleRight.tri` | eyes 88–175 | window | 0.105 / 0.376 / 0.897 |
+| `HPH/femaleheadbrows.tri` | brows | index | 0.244 / 0.338 / 0.425 |
+| `HPH/femaleheadmaskleftside.tri` | head | surface | 0.191 / 0.472 / 0.573 |
+| `HPH/femaleheadmaskrightside.tri` | head | surface | 0.171 / 0.464 / 0.577 |
+
+The vanilla `FemaleHead*` files are superseded by their HPH namesakes. All male files and the male
+mouth are rejected; the vanilla `MaleHeadbrows.tri` misses the median limit by only 0.002 and would in
+any case lose to the brows' exact source. Result: 47 blend shapes.
+
+**Surface transfer.** Each slot vertex takes the motion of the nearest mask point, preferring a
+same-facing mask triangle when it is within 0.3 of the nearest overall. Each mask's winding is
+detected from the data. Full strength applies within 1.0 of the mask, fading to zero at 1.5. Where
+closed lips nearly touch, a vertex therefore follows its own lip. At closed mouth corners 3D proximity
+cannot always decide: 2 of 500 mirrored vertex pairs disagree on `Aah`. Two alternatives were measured
+and rejected: UV transfer (the HPH masks have their own UV layout; no UV coincides with the head's)
+and filling ambiguous vertices from mesh neighbours (7 pairs, worse). The HPH chargen `.tri` holds the
+unshaped head the masks were authored on and could resolve the corners; the user did not supply it.
+
+**FBX.** One `FbxBlendShape` with a channel per morph name. Shapes are written in full (one position
+per mesh vertex): the SDK's sparse-index form lost most offsets on read-back. Offsets below about a
+micrometre are zeroed by the SDK.
+
+**Checks.**
+- Core: TRI decoding; the decisions above; the left eye's `BlinkLeft` reproduced exactly with the
+  right eye still; blinks peaking on the correct side and moving down; `Aah` opening downwards.
+- Core, surface transfer: left/right consistency of `Aah` and `MoodHappy` measured against the source
+  masks' own asymmetry (`Aah` p90 1.4% vs 0.6% in the source, `MoodHappy` 11.3% vs 8.7%); mouth-corner
+  disagreements ≤ 1% of pairs; the back of the head untouched; full-shape FBX round trip within 2 µm.
+- Unity: all 47 imported by name, zero weights leave the mesh at rest, blink side and direction,
+  `Aah` below the eyes and moving down, every morph confined to head parts, face renders.
+
 ## 5. Open questions (asked one at a time)
 
 Decided: the tool ships the Unity editor package (M5), and its materials target the

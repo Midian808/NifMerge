@@ -88,6 +88,8 @@ struct LogLine {
 struct AppState {
 	std::string skeleton;
 	std::vector<std::string> partFiles; // as added; paired for display and for the run
+	std::vector<std::string> morphPaths; // .tri files and folders
+	int selectedMorph = -1;
 	int selectedPart = -1;
 	float weight = 50.0f;
 	std::string output;
@@ -116,12 +118,27 @@ bool IsSkeletonFile(const std::string& path) {
 	return n.find("skeleton") != std::string::npos;
 }
 
+void AddMorphPath(const std::string& p) {
+	for (auto& existing : g_app.morphPaths)
+		if (fs::u8path(existing).lexically_normal() == fs::u8path(p).lexically_normal()) return;
+	g_app.morphPaths.push_back(p);
+}
+
+// .nif files go to the skeleton or the parts, .tri files and folders to the facial morphs.
 void AddFiles(const std::vector<std::string>& files) {
 	for (const auto& f : files) {
+		if (fs::is_directory(fs::u8path(f))) {
+			AddMorphPath(f);
+			continue;
+		}
 		std::string ext = fs::u8path(f).extension().u8string();
 		for (auto& c : ext) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+		if (ext == ".tri") {
+			AddMorphPath(f);
+			continue;
+		}
 		if (ext != ".nif") {
-			g_app.Log(nm::LogLevel::Warning, "Ignored (not a .nif): " + f);
+			g_app.Log(nm::LogLevel::Warning, "Ignored (not a .nif or .tri): " + f);
 			continue;
 		}
 		if (IsSkeletonFile(f)) g_app.skeleton = f;
@@ -133,16 +150,20 @@ void AddFiles(const std::vector<std::string>& files) {
 
 // ---- File dialogs ------------------------------------------------------------------------------
 
-std::vector<std::string> OpenFiles(HWND owner, bool multi, const wchar_t* title) {
+enum class Pick { Nif, Tri, Folder };
+
+std::vector<std::string> OpenFiles(HWND owner, bool multi, const wchar_t* title, Pick pick = Pick::Nif) {
 	std::vector<std::string> out;
 	IFileOpenDialog* dlg = nullptr;
 	if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg)))) return out;
-	COMDLG_FILTERSPEC filters[] = {{L"NIF files", L"*.nif"}, {L"All files", L"*.*"}};
-	dlg->SetFileTypes(2, filters);
+	COMDLG_FILTERSPEC nif[] = {{L"NIF files", L"*.nif"}, {L"All files", L"*.*"}};
+	COMDLG_FILTERSPEC tri[] = {{L"Morph files", L"*.tri"}, {L"All files", L"*.*"}};
+	if (pick != Pick::Folder) dlg->SetFileTypes(2, pick == Pick::Tri ? tri : nif);
 	dlg->SetTitle(title);
 	DWORD opts = 0;
 	dlg->GetOptions(&opts);
-	dlg->SetOptions(opts | FOS_FILEMUSTEXIST | (multi ? FOS_ALLOWMULTISELECT : 0));
+	dlg->SetOptions(opts | FOS_FILEMUSTEXIST | (multi ? FOS_ALLOWMULTISELECT : 0) |
+					(pick == Pick::Folder ? FOS_PICKFOLDERS : 0));
 	if (SUCCEEDED(dlg->Show(owner))) {
 		IShellItemArray* items = nullptr;
 		if (SUCCEEDED(dlg->GetResults(&items))) {
@@ -195,6 +216,7 @@ void StartRun() {
 	opt.request.skeletonPath = g_app.skeleton;
 	opt.request.parts = nm::PairPartFiles(g_app.partFiles);
 	opt.request.weight = g_app.weight;
+	opt.request.morphPaths = g_app.morphPaths;
 	opt.fbxPath = g_app.output;
 	if (g_app.writeObj && !opt.fbxPath.empty())
 		opt.objPath = (fs::u8path(opt.fbxPath).replace_extension(".obj")).u8string();
@@ -241,7 +263,7 @@ void DrawUi(HWND hwnd) {
 
 	ImGui::SeparatorText("Model parts");
 	ImGui::TextDisabled("Body, hands, feet, head / FaceGen head, hair... _0/_1 weight files pair automatically. "
-						"You can also drag .nif files onto this window.");
+						"You can also drag .nif and .tri files, or folders of .tri files, onto this window.");
 	auto parts = nm::PairPartFiles(g_app.partFiles);
 	const float listH = ImGui::GetTextLineHeightWithSpacing() * 8;
 	if (ImGui::BeginListBox("##parts", ImVec2(-FLT_MIN, listH))) {
@@ -273,6 +295,35 @@ void DrawUi(HWND hwnd) {
 	if (ImGui::Button("Clear")) {
 		g_app.partFiles.clear();
 		g_app.selectedPart = -1;
+	}
+
+	ImGui::SeparatorText("Facial morphs (.tri, optional)");
+	ImGui::TextDisabled("Expression, phoneme, blink and eye-look morphs become blend shapes. Add .tri files or whole "
+						"folders: each file is matched to a head part by its geometry, and the log shows the decisions.");
+	if (ImGui::BeginListBox("##morphs", ImVec2(-FLT_MIN, ImGui::GetTextLineHeightWithSpacing() * 4))) {
+		for (int i = 0; i < static_cast<int>(g_app.morphPaths.size()); i++) {
+			const std::string& p = g_app.morphPaths[i];
+			std::string label = (fs::is_directory(fs::u8path(p)) ? "[folder] " : "") + p + "##m" + std::to_string(i);
+			if (ImGui::Selectable(label.c_str(), g_app.selectedMorph == i)) g_app.selectedMorph = i;
+		}
+		ImGui::EndListBox();
+	}
+	if (ImGui::Button("Add files...##tri"))
+		for (auto& f : OpenFiles(hwnd, true, L"Add morph (.tri) files", Pick::Tri)) AddMorphPath(f);
+	ImGui::SameLine();
+	if (ImGui::Button("Add folder...##tri"))
+		for (auto& f : OpenFiles(hwnd, false, L"Add a folder of morph (.tri) files", Pick::Folder)) AddMorphPath(f);
+	ImGui::SameLine();
+	ImGui::BeginDisabled(g_app.selectedMorph < 0 || g_app.selectedMorph >= static_cast<int>(g_app.morphPaths.size()));
+	if (ImGui::Button("Remove##tri")) {
+		g_app.morphPaths.erase(g_app.morphPaths.begin() + g_app.selectedMorph);
+		g_app.selectedMorph = -1;
+	}
+	ImGui::EndDisabled();
+	ImGui::SameLine();
+	if (ImGui::Button("Clear##tri")) {
+		g_app.morphPaths.clear();
+		g_app.selectedMorph = -1;
 	}
 
 	ImGui::SeparatorText("Body weight");
@@ -365,7 +416,7 @@ int RunGui(const GuiInit& init) {
 	wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
 	RegisterClassExW(&wc);
 	HWND hwnd = CreateWindowW(wc.lpszClassName, L"NifMerge - Skyrim NIF to Unity Humanoid FBX", WS_OVERLAPPEDWINDOW,
-							  100, 100, static_cast<int>(820 * dpi), static_cast<int>(760 * dpi), nullptr, nullptr,
+							  100, 100, static_cast<int>(820 * dpi), static_cast<int>(900 * dpi), nullptr, nullptr,
 							  wc.hInstance, nullptr);
 	if (!CreateDevice(hwnd)) {
 		CleanupDevice();
@@ -390,6 +441,7 @@ int RunGui(const GuiInit& init) {
 	ImGui_ImplDX11_Init(g_device, g_context);
 
 	AddFiles(init.files);
+	for (auto& p : init.morphPaths) AddMorphPath(p);
 	if (!init.skeleton.empty()) g_app.skeleton = init.skeleton;
 	if (!init.output.empty()) g_app.output = init.output;
 	g_app.weight = init.weight;

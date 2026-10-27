@@ -38,7 +38,7 @@ target_link_libraries(imgui PUBLIC d3d11 d3dcompiler dxgi dwmapi)
 # ---- Core library -----------------------------------------------------------------------------
 add_library(nifmerge_core STATIC
     src/core/NifIO.cpp src/core/Merge.cpp src/core/FbxExport.cpp src/core/SidecarExport.cpp
-    src/core/Pipeline.cpp src/core/TextUtil.cpp)
+    src/core/Pipeline.cpp src/core/TextUtil.cpp src/core/Tri.cpp src/core/Morphs.cpp)
 target_include_directories(nifmerge_core PUBLIC src)
 target_link_libraries(nifmerge_core PUBLIC nifly fbxsdk)
 

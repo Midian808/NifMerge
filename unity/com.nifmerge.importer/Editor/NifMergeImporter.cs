@@ -10,7 +10,7 @@ namespace NifMerge
     public class NifMergeImporter : AssetPostprocessor
     {
         const string StampPrefix = "nifmerge:";
-        const string ImporterVersion = "2";
+        const string ImporterVersion = "3";
 
         static void OnPostprocessAllAssets(string[] imported, string[] deleted, string[] moved, string[] movedFrom)
         {
@@ -99,7 +99,9 @@ namespace NifMerge
             importer.globalScale = 1f;
             importer.importNormals = ModelImporterNormals.Import;
             importer.importTangents = ModelImporterTangents.CalculateMikk;
-            importer.importBlendShapes = false;
+            // Facial morphs from .tri files arrive as blend shapes; Unity derives their normals.
+            importer.importBlendShapes = true;
+            importer.importBlendShapeNormals = ModelImporterNormals.Calculate;
             importer.importAnimation = false;
             importer.optimizeGameObjects = false;
 

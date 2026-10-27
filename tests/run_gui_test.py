@@ -35,7 +35,7 @@ def check(ok, what):
 
 
 def args_for(out_fbx, skeleton="skeleton_female.nif"):
-    a = ["--skeleton", str(S / skeleton), "--weight", "50", "--out", str(out_fbx)]
+    a = ["--skeleton", str(S / skeleton), "--weight", "50", "--tri", str(S / "trifiles"), "--out", str(out_fbx)]
     for p in PARTS:
         a += ["--part", str(S / p)]
     return a

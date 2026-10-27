@@ -19,8 +19,9 @@ const char* kUsage =
 	"Usage:\n"
 	"  NifMerge                                   open the GUI\n"
 	"  NifMerge merge --skeleton <skeleton.nif> --part <part.nif> [--part ...]\n"
-	"                 [--weight <0..100>] --out <model.fbx> [--obj <debug.obj>]\n"
+	"                 [--weight <0..100>] [--tri <file.tri | folder> ...] --out <model.fbx> [--obj <debug.obj>]\n"
 	"      _0/_1 weight files are paired automatically; listing either one is enough.\n"
+	"      --tri adds facial morphs (blend shapes): each .tri is matched to a head part by its geometry.\n"
 	"  NifMerge inspect <file.nif> [--skeleton <skeleton.nif>]\n";
 
 void ConsoleLog(nm::LogLevel level, const std::string& msg) {
@@ -45,6 +46,7 @@ int RunCli(const std::vector<std::string>& args) {
 			else if (a == "--weight") opt.request.weight = std::stod(value(i));
 			else if (a == "--out") opt.fbxPath = value(i);
 			else if (a == "--obj") opt.objPath = value(i);
+			else if (a == "--tri") opt.request.morphPaths.push_back(value(i));
 			else throw nm::Error("Unknown option: " + a);
 		}
 		if (opt.request.weight < 0 || opt.request.weight > 100) throw nm::Error("--weight must be between 0 and 100");
@@ -96,6 +98,7 @@ GuiInit ParseGuiArgs(const std::vector<std::string>& args) {
 		};
 		if (a == "--skeleton") init.skeleton = value();
 		else if (a == "--part") init.files.push_back(value());
+		else if (a == "--tri") init.morphPaths.push_back(value());
 		else if (a == "--out") init.output = value();
 		else if (a == "--weight") init.weight = std::stof(value());
 		else if (a == "--go") init.go = true;

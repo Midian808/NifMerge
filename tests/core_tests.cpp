@@ -3,18 +3,22 @@
 #include "core/Export.hpp"
 #include "core/Humanoid.hpp"
 #include "core/Merge.hpp"
+#include "core/Morphs.hpp"
 #include "core/NifIO.hpp"
 #include "core/Pipeline.hpp"
+#include "core/Tri.hpp"
 
 #include "NifFile.hpp"
 #include <fbxsdk.h>
 
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <functional>
 #include <map>
 #include <tuple>
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -59,6 +63,11 @@ struct Reg {
 	void name();                           \
 	Reg reg_##name(#name, name);           \
 	void name()
+
+std::string Lower(std::string s) {
+	for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+	return s;
+}
 
 bool Near(const Vec3& a, const Vec3& b, double eps) {
 	return std::fabs(a.x - b.x) < eps && std::fabs(a.y - b.y) < eps && std::fabs(a.z - b.z) < eps;
@@ -346,6 +355,323 @@ TEST(ModelSpaceNormalMatrix) {
 	}
 	const int expectedMsn = SampleShapeCounts().second;
 	CHECK(expectedMsn > 0 && msn == expectedMsn, "%d model-space slots expected, got %d", expectedMsn, msn);
+}
+
+// ---- Facial morphs (.tri). samples/trifiles holds a mixed female/male, vanilla/High-Poly-Head set.
+
+const MergedModel& MorphModel() {
+	static MergedModel m = MergeModel(
+		{Sample("skeleton_female.nif"), PairPartFiles(SampleParts()), 50, {Sample("trifiles")}}, Quiet);
+	return m;
+}
+
+const BlendShape* FindBlendShape(const MergedModel& m, const std::string& name) {
+	for (auto& b : m.blendShapes)
+		if (b.name == name) return &b;
+	return nullptr;
+}
+
+int SlotOfVertex(const MergedModel& m, uint32_t v) {
+	for (size_t i = 0; i < m.materialVertices.size(); i++)
+		if (v >= m.materialVertices[i].first && v < m.materialVertices[i].first + m.materialVertices[i].second)
+			return static_cast<int>(i);
+	return -1;
+}
+
+int SlotByShader(const MergedModel& m, uint32_t type) {
+	for (size_t i = 0; i < m.materials.size(); i++)
+		if (m.materials[i].shaderType == type) return static_cast<int>(i);
+	return -1;
+}
+
+TEST(TriFilesRead) {
+	auto files = ExpandMorphPaths({Sample("trifiles")});
+	CHECK(files.size() >= 6, "expected the sample .tri files, found %zu", files.size());
+	for (auto& f : files) {
+		TriFile t = ReadTri(f); // throws on a byte left over or missing
+		CHECK(!t.vertices.empty() && !t.triangles.empty() && !t.morphs.empty(), "%s decoded empty", f.c_str());
+		for (auto& m : t.morphs) CHECK(m.deltas.size() == t.vertices.size(), "%s/%s delta count", f.c_str(), m.name.c_str());
+	}
+	bool threw = false;
+	try {
+		ReadTri(Sample("Head.nif"));
+	}
+	catch (const Error&) {
+		threw = true;
+	}
+	CHECK(threw, "a non-TRI file must be rejected");
+}
+
+TEST(MorphSourceDecisions) {
+	const MergedModel& m = MorphModel();
+	std::map<std::string, const MorphSource*> by;
+	for (auto& s : m.morphSources)
+		by[Lower(fs::u8path(s.file).parent_path().filename().u8string() + "/" + fs::u8path(s.file).filename().u8string())] = &s;
+	auto expect = [&](const std::string& key, const char* mode, int slot, uint32_t start) {
+		auto it = by.find(Lower(key));
+		CHECK(it != by.end(), "%s not reported", key.c_str());
+		if (it == by.end()) return;
+		const MorphSource& s = *it->second;
+		CHECK(s.outcome == "applied", "%s: %s", key.c_str(), s.outcome.c_str());
+		CHECK(s.mode == mode, "%s mode %s, expected %s", key.c_str(), s.mode.c_str(), mode);
+		CHECK(slot >= 0 && s.shape == m.materials[slot].name, "%s applied to '%s'", key.c_str(), s.shape.c_str());
+		CHECK(s.windowStart == start, "%s window start %u, expected %u", key.c_str(), s.windowStart, start);
+	};
+	const int head = SlotByShader(m, 4);
+	int mouth = -1, eyes = -1, brows = -1;
+	for (size_t i = 0; i < m.materials.size(); i++) {
+		const std::string& n = m.materials[i].shapeName;
+		if (n.find("Mouth") != std::string::npos) mouth = int(i);
+		if (n.find("Eyes") != std::string::npos) eyes = int(i);
+		if (n.find("Brow") != std::string::npos) brows = int(i);
+	}
+	expect("trifiles/MouthHumanF.tri", "index", mouth, 0);
+	expect("trifiles/EyesFemaleLeft.tri", "window", eyes, 0);
+	expect("trifiles/EyesFemaleRight.tri", "window", eyes, 88);
+	expect("hph/femaleheadbrows.tri", "index", brows, 0);
+	expect("hph/femaleheadmaskleftside.tri", "surface", head, 0);
+	expect("hph/femaleheadmaskrightside.tri", "surface", head, 0);
+	size_t applied = 0, male = 0;
+	for (auto& s : m.morphSources) {
+		applied += s.outcome == "applied";
+		std::string f = Lower(fs::u8path(s.file).filename().u8string());
+		if (f.rfind("male", 0) == 0 || f.find("eyesmale") == 0 || f == "mouthhuman.tri") {
+			male++;
+			CHECK(s.outcome != "applied", "male/other-head file applied: %s", s.file.c_str());
+		}
+	}
+	CHECK(applied == 6, "6 files applied, got %zu", applied);
+	CHECK(male >= 9, "male files present in the sample set: %zu", male);
+}
+
+TEST(IndexMorphsAreExact) {
+	const MergedModel& m = MorphModel();
+	TriFile left = ReadTri(Sample("trifiles/EyesFemaleLeft.tri"));
+	const BlendShape* blink = FindBlendShape(m, "BlinkLeft");
+	CHECK(blink, "BlinkLeft exists");
+	if (!blink) return;
+	int eyes = -1;
+	for (size_t i = 0; i < m.materials.size(); i++)
+		if (m.materials[i].shapeName.find("Eyes") != std::string::npos) eyes = int(i);
+	const uint32_t first = m.materialVertices[eyes].first;
+	const TriMorph* src = nullptr;
+	for (auto& t : left.morphs)
+		if (t.name == "BlinkLeft") src = &t;
+	CHECK(src, "BlinkLeft in EyesFemaleLeft.tri");
+	if (!src) return;
+	std::map<uint32_t, Vec3> got;
+	for (size_t i = 0; i < blink->vertices.size(); i++) got[blink->vertices[i]] = blink->deltas[i];
+	double worst = 0;
+	size_t moved = 0;
+	for (size_t k = 0; k < left.vertices.size(); k++) {
+		Vec3 want = m.materials[eyes].skinToRest * src->deltas[k];
+		Vec3 have = got.count(first + uint32_t(k)) ? got[first + uint32_t(k)] : Vec3();
+		worst = std::fmax(worst, (have - want).length());
+		moved += want.length() > 1e-6;
+	}
+	CHECK(moved > 10 && worst < 1e-9, "left-eye BlinkLeft reproduced exactly (%zu verts, error %g)", moved, worst);
+	// The right eye's half must not move on BlinkLeft.
+	size_t rightMoved = 0;
+	for (uint32_t k = 88; k < 176; k++) rightMoved += got.count(first + k) ? got[first + k].length() > 1e-6 : 0;
+	CHECK(rightMoved == 0, "BlinkLeft moved %zu right-eye vertices", rightMoved);
+}
+
+// Left/right asymmetry of a morph in the source masks themselves: for each vertex of one mask, the
+// motion of the mirrored vertex in the other mask, mirrored back. Returns the p90 as a fraction of peak.
+double SourceAsymmetryP90(const MergedModel& m, const std::string& morphName) {
+	std::vector<TriFile> masks;
+	for (auto& s : m.morphSources)
+		if (s.outcome == "applied" && s.mode == "surface") masks.push_back(ReadTri(s.file));
+	if (masks.size() != 2) return -1;
+	auto deltas = [&](const TriFile& t) -> const std::vector<Vec3>* {
+		for (auto& mo : t.morphs)
+			if (mo.name == morphName) return &mo.deltas;
+		return nullptr;
+	};
+	const std::vector<Vec3>* a = deltas(masks[0]);
+	const std::vector<Vec3>* b = deltas(masks[1]);
+	if (!a || !b) return -1;
+	double peak = 0;
+	for (auto& d : *a) peak = std::fmax(peak, d.length());
+	for (auto& d : *b) peak = std::fmax(peak, d.length());
+	std::vector<double> diff;
+	for (size_t i = 0; i < masks[0].vertices.size(); i++) {
+		if ((*a)[i].length() < 0.05 * peak) continue;
+		const Vec3& q = masks[0].vertices[i];
+		double best = 0.08;
+		size_t j = SIZE_MAX;
+		for (size_t k = 0; k < masks[1].vertices.size(); k++) {
+			double dist = (masks[1].vertices[k] - Vec3(-q.x, q.y, q.z)).length();
+			if (dist < best) best = dist, j = k;
+		}
+		if (j == SIZE_MAX) continue;
+		Vec3 mirrored(-(*b)[j].x, (*b)[j].y, (*b)[j].z);
+		diff.push_back(((*a)[i] - mirrored).length() / peak);
+	}
+	if (diff.empty()) return -1;
+	std::sort(diff.begin(), diff.end());
+	return diff[diff.size() * 9 / 10];
+}
+
+TEST(SurfaceMorphTransfer) {
+	const MergedModel& m = MorphModel();
+	const int head = SlotByShader(m, 4);
+	const uint32_t first = m.materialVertices[head].first, count = m.materialVertices[head].second;
+	Vec3 headBone;
+	for (auto& b : m.bones)
+		if (b.name == "NPC Head [Head]") headBone = b.world.t;
+
+	// Neighbour lists of the head mesh (by position, so UV-seam copies count as one surface point).
+	std::vector<std::vector<uint32_t>> nbr(count);
+	for (size_t t = 0; t < m.tris.size(); t++) {
+		if (m.triMaterial[t] != head) continue;
+		for (int a = 0; a < 3; a++)
+			for (int b = 0; b < 3; b++)
+				if (a != b) nbr[m.tris[t][a] - first].push_back(m.tris[t][b] - first);
+	}
+	auto check = [&](const char* name, double sideSign, bool down, bool symmetric) {
+		const BlendShape* b = FindBlendShape(m, name);
+		CHECK(b, "%s exists", name);
+		if (!b) return;
+		// Where the morph acts most, over the whole model (blinks live mostly in the eye mesh).
+		double peak = 0;
+		size_t peakI = 0;
+		for (size_t i = 0; i < b->vertices.size(); i++)
+			if (b->deltas[i].length() > peak) peak = b->deltas[i].length(), peakI = i;
+		CHECK(peak > 0.1, "%s peak %.3f", name, peak);
+		const Vec3& pp = m.positions[b->vertices[peakI]];
+		if (sideSign != 0) CHECK(pp.x * sideSign > 0.5, "%s peaks on the wrong side (x=%.2f)", name, pp.x);
+		if (down) CHECK(b->deltas[peakI].z < 0, "%s peak moves up", name);
+
+		std::vector<Vec3> d(count);
+		double headPeak = 0;
+		for (size_t i = 0; i < b->vertices.size(); i++)
+			if (SlotOfVertex(m, b->vertices[i]) == head) {
+				d[b->vertices[i] - first] = b->deltas[i];
+				headPeak = std::fmax(headPeak, b->deltas[i].length());
+			}
+		// Left and right masks transfer consistently: a symmetric morph moves each vertex as the mirror of
+		// its counterpart on the other side of the face (the head is close to symmetric).
+		if (symmetric && headPeak > 0) {
+			std::map<std::tuple<long long, long long, long long>, uint32_t> grid;
+			auto key = [](double x, double y, double z) {
+				return std::make_tuple(std::llround(x / 0.25), std::llround(y / 0.25), std::llround(z / 0.25));
+			};
+			for (uint32_t v = 0; v < count; v++) {
+				const Vec3& q = m.positions[first + v];
+				grid[key(q.x, q.y, q.z)] = v;
+			}
+			std::vector<double> diff;
+			for (uint32_t v = 0; v < count; v++) {
+				const Vec3& q = m.positions[first + v];
+				if (d[v].length() < 0.05 * headPeak || std::fabs(q.x) < 0.3) continue;
+				double bestDist = 0.08;
+				uint32_t mirror = UINT32_MAX;
+				for (int dx = -1; dx <= 1; dx++)
+					for (int dy = -1; dy <= 1; dy++)
+						for (int dz = -1; dz <= 1; dz++) {
+							auto it = grid.find(std::make_tuple(std::get<0>(key(-q.x, q.y, q.z)) + dx,
+																std::get<1>(key(-q.x, q.y, q.z)) + dy,
+																std::get<2>(key(-q.x, q.y, q.z)) + dz));
+							if (it == grid.end()) continue;
+							double dist = (m.positions[first + it->second] - Vec3(-q.x, q.y, q.z)).length();
+							const Vec3& nv = m.normals[first + v];
+							if (Vec3(-nv.x, nv.y, nv.z).dot(m.normals[first + it->second]) < 0.7) continue;
+							if (dist < bestDist) bestDist = dist, mirror = it->second;
+						}
+				if (mirror == UINT32_MAX) continue;
+				Vec3 mirrored(-d[mirror].x, d[mirror].y, d[mirror].z);
+				diff.push_back((d[v] - mirrored).length() / headPeak);
+			}
+			std::sort(diff.begin(), diff.end());
+			CHECK(diff.size() > 100, "%s: %zu mirrored vertex pairs", name, diff.size());
+			if (!diff.empty()) {
+				double p90 = diff[diff.size() * 9 / 10], mx = diff.back();
+				std::printf("    [sym] %s: %zu pairs, p50 %.3f p90 %.3f max %.3f (fraction of peak %.3f)\n", name, diff.size(),
+							diff[diff.size() / 2], p90, mx, headPeak);
+				size_t big = 0;
+				for (double x : diff) big += x > 0.3;
+				const double source = SourceAsymmetryP90(m, name);
+				std::printf("    [sym] %s: source masks p90 %.3f; %zu pairs differ by more than 30%% of peak\n", name, source, big);
+				// The transfer may add a little asymmetry (the shaped head is not perfectly symmetric) but must
+				// track the source's own; at closed mouth corners 3D proximity cannot always tell the lips
+				// apart, so a few pairs there may follow the other lip.
+				CHECK(source >= 0 && p90 <= source + 0.05, "%s: transfer asymmetry p90 %.3f vs source %.3f", name, p90, source);
+				CHECK(big * 100 <= diff.size(), "%s: %zu of %zu mirrored pairs disagree by more than 30%% of peak", name, big,
+					  diff.size());
+			}
+		}
+		// The back of the head (well behind the head bone) does not move.
+		double back = 0;
+		for (uint32_t v = 0; v < count; v++)
+			if (m.positions[first + v].y < headBone.y - 4) back = std::fmax(back, d[v].length());
+		CHECK(back < 1e-6, "%s moves the back of the head by %.3f", name, back);
+	};
+	check("BlinkLeft", -1, true, false); // Skyrim +X is the character's right
+	check("BlinkRight", +1, true, false);
+	check("Aah", 0, true, true);         // jaw opens downwards
+	check("MoodHappy", 0, false, true);
+
+	const BlendShape* aah = FindBlendShape(m, "Aah");
+	if (aah) {
+		size_t headMoved = 0;
+		for (size_t i = 0; i < aah->vertices.size(); i++) headMoved += SlotOfVertex(m, aah->vertices[i]) == head;
+		CHECK(headMoved > 200 && headMoved < count, "Aah transfers to part of the head, not all of it (%zu of %u)", headMoved, count);
+	}
+}
+
+TEST(BlendShapesRoundTripFbx) {
+	RunOptions opt;
+	opt.request = {Sample("skeleton_female.nif"), PairPartFiles(SampleParts()), 50, {Sample("trifiles")}};
+	opt.fbxPath = Tmp("morphs.fbx");
+	RunPipeline(opt, Quiet);
+	const MergedModel& m = MorphModel();
+	FbxManager* mgr = FbxManager::Create();
+	FbxIOSettings* ios = FbxIOSettings::Create(mgr, IOSROOT);
+	mgr->SetIOSettings(ios);
+	FbxImporter* imp = FbxImporter::Create(mgr, "");
+	CHECK(imp->Initialize(opt.fbxPath.c_str(), -1, ios), "importer init");
+	FbxScene* scene = FbxScene::Create(mgr, "");
+	imp->Import(scene);
+	imp->Destroy();
+	FbxMesh* mesh = nullptr;
+	std::function<void(FbxNode*)> find = [&](FbxNode* n) {
+		if (n->GetMesh()) mesh = n->GetMesh();
+		for (int i = 0; i < n->GetChildCount(); i++) find(n->GetChild(i));
+	};
+	find(scene->GetRootNode());
+	CHECK(mesh && mesh->GetDeformerCount(FbxDeformer::eBlendShape) == 1, "one blend shape deformer");
+	if (!mesh || mesh->GetDeformerCount(FbxDeformer::eBlendShape) != 1) return;
+	auto* blend = static_cast<FbxBlendShape*>(mesh->GetDeformer(0, FbxDeformer::eBlendShape));
+	CHECK(blend->GetBlendShapeChannelCount() == int(m.blendShapes.size()), "%d channels, expected %zu",
+		  blend->GetBlendShapeChannelCount(), m.blendShapes.size());
+	// The SDK reads sparse shapes back as full shapes (one point per mesh vertex), so compare the offset
+	// of every vertex: ours where the morph acts, zero elsewhere.
+	double worst = 0;
+	for (int c = 0; c < blend->GetBlendShapeChannelCount() && c < int(m.blendShapes.size()); c++) {
+		FbxShape* shape = blend->GetBlendShapeChannel(c)->GetTargetShape(0);
+		const BlendShape& b = m.blendShapes[c];
+		CHECK(std::string(blend->GetBlendShapeChannel(c)->GetName()) == b.name, "channel %d name", c);
+		std::vector<Vec3> want(mesh->GetControlPointsCount());
+		for (size_t i = 0; i < b.vertices.size(); i++) {
+			const Vec3& d = b.deltas[i];
+			want[b.vertices[i]] = {-d.x * kMetresPerUnit, d.z * kMetresPerUnit, d.y * kMetresPerUnit};
+		}
+		const bool dense = shape->GetControlPointsCount() == mesh->GetControlPointsCount();
+		CHECK(dense || shape->GetControlPointsCount() == int(b.vertices.size()), "%s point count %d", b.name.c_str(),
+			  shape->GetControlPointsCount());
+		for (int i = 0; i < shape->GetControlPointsCount(); i++) {
+			int v = dense ? i : shape->GetControlPointIndices()[i];
+			FbxVector4 base = mesh->GetControlPointAt(v), target = shape->GetControlPointAt(i);
+			worst = std::fmax(worst, (Vec3(target[0] - base[0], target[1] - base[1], target[2] - base[2]) - want[v]).length());
+		}
+	}
+	// The SDK zeroes shape offsets below about a micrometre; anything larger must survive exactly.
+	CHECK(worst < 2e-6, "blend shape offsets survive the FBX round trip (error %g m)", worst);
+	mgr->Destroy();
+
+	MergedModel plain = MergeModel({Sample("skeleton_female.nif"), PairPartFiles(SampleParts()), 50}, Quiet);
+	CHECK(plain.blendShapes.empty() && plain.morphSources.empty(), "no morphs without .tri input");
 }
 
 TEST(MergeLegacySkyrim) {

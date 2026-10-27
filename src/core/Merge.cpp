@@ -1,6 +1,7 @@
 #include "Merge.hpp"
 
 #include "Humanoid.hpp"
+#include "Morphs.hpp"
 #include "NifIO.hpp"
 
 #include <algorithm>
@@ -224,6 +225,7 @@ MergedModel MergeModel(const MergeRequest& req, const LogFn& log) {
 		m.materials.push_back(mat);
 
 		const uint32_t base = static_cast<uint32_t>(m.positions.size());
+		m.materialVertices.push_back({base, static_cast<uint32_t>(s.positions.size())});
 		for (size_t v = 0; v < s.positions.size(); v++) {
 			m.positions.push_back(s.positions[v]);
 			m.normals.push_back(s.normals.empty() ? Vec3() : s.normals[v]);
@@ -241,6 +243,7 @@ MergedModel MergeModel(const MergeRequest& req, const LogFn& log) {
 	}
 
 	ComputeMissingNormals(m, needsNormal);
+	if (!req.morphPaths.empty()) ApplyMorphs(m, req.morphPaths, log);
 
 	log(LogLevel::Info, "Merged " + std::to_string(m.materials.size()) + " shapes: " + std::to_string(m.positions.size()) +
 							" vertices, " + std::to_string(m.tris.size()) + " triangles, " + std::to_string(m.bones.size()) +
