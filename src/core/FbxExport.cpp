@@ -1,56 +1,14 @@
 #include "Export.hpp"
-
-#include <fbxsdk.h>
+#include "FbxCommon.hpp"
 
 #include <filesystem>
 
 namespace nm {
 
-namespace {
-
-// Rc maps Skyrim axes to FBX axes: (x, y, z) -> (-x, z, y).
-const Mat3 kRc = [] {
-	Mat3 r = Mat3::zero();
-	r.m[0][0] = -1;
-	r.m[1][2] = 1;
-	r.m[2][1] = 1;
-	return r;
-}();
-
-Vec3 ToFbxPoint(const Vec3& p) { return (kRc * p) * kMetresPerUnit; }
-Vec3 ToFbxDir(const Vec3& d) { return kRc * d; }
-Xform ToFbxXform(const Xform& x) { return {kRc * x.L * kRc.transposed(), ToFbxPoint(x.t)}; }
-
-// FbxAMatrix uses the row-vector convention: rows 0..2 are the basis vectors, row 3 the translation.
-FbxAMatrix ToFbxMatrix(const Xform& x) {
-	FbxAMatrix m;
-	m.SetIdentity();
-	for (int i = 0; i < 3; i++) m.SetRow(i, FbxVector4(x.L.m[0][i], x.L.m[1][i], x.L.m[2][i], 0.0));
-	m.SetRow(3, FbxVector4(x.t.x, x.t.y, x.t.z, 1.0));
-	return m;
-}
-
-struct FbxSession {
-	FbxManager* mgr = FbxManager::Create();
-	~FbxSession() {
-		if (mgr) mgr->Destroy();
-	}
-};
-
-} // namespace
-
 void WriteFbx(const MergedModel& m, const std::string& fbxPath, const LogFn& log) {
 	if (m.positions.empty()) throw Error("Nothing to write: the merged model is empty");
-	FbxSession session;
-	FbxManager* mgr = session.mgr;
-	if (!mgr) throw Error("Could not initialise the FBX SDK");
-	FbxIOSettings* ios = FbxIOSettings::Create(mgr, IOSROOT);
-	mgr->SetIOSettings(ios);
-
-	FbxScene* scene = FbxScene::Create(mgr, "NifMerge");
-	scene->GetGlobalSettings().SetAxisSystem(
-		FbxAxisSystem(FbxAxisSystem::eYAxis, FbxAxisSystem::eParityOdd, FbxAxisSystem::eRightHanded));
-	scene->GetGlobalSettings().SetSystemUnit(FbxSystemUnit::m);
+	FbxSession session("NifMerge");
+	FbxScene* scene = session.scene;
 	FbxNode* root = scene->GetRootNode();
 
 	// Bones.
@@ -60,18 +18,7 @@ void WriteFbx(const MergedModel& m, const std::string& fbxPath, const LogFn& log
 		const OutBone& b = m.bones[i];
 		boneWorld[i] = ToFbxXform(b.world);
 		Xform local = b.parent < 0 ? boneWorld[i] : boneWorld[b.parent].inverse() * boneWorld[i];
-		FbxAMatrix lm = ToFbxMatrix(local);
-
-		FbxSkeleton* attr = FbxSkeleton::Create(scene, b.name.c_str());
-		attr->SetSkeletonType(b.parent < 0 ? FbxSkeleton::eRoot : FbxSkeleton::eLimbNode);
-		attr->Size.Set(1.0);
-		FbxNode* node = FbxNode::Create(scene, b.name.c_str());
-		node->SetNodeAttribute(attr);
-		node->LclTranslation.Set(lm.GetT());
-		node->LclRotation.Set(lm.GetR());
-		node->LclScaling.Set(FbxDouble3(1, 1, 1));
-		(b.parent < 0 ? root : boneNodes[b.parent])->AddChild(node);
-		boneNodes[i] = node;
+		boneNodes[i] = AddBoneNode(scene, b.parent < 0 ? root : boneNodes[b.parent], b.name, local, b.parent < 0);
 	}
 
 	// Mesh.
@@ -180,13 +127,7 @@ void WriteFbx(const MergedModel& m, const std::string& fbxPath, const LogFn& log
 	for (size_t i = 0; i < m.bones.size(); i++) pose->Add(boneNodes[i], FbxMatrix(ToFbxMatrix(boneWorld[i])));
 	scene->AddPose(pose);
 
-	FbxExporter* exporter = FbxExporter::Create(mgr, "");
-	int format = mgr->GetIOPluginRegistry()->GetNativeWriterFormat();
-	if (!exporter->Initialize(fbxPath.c_str(), format, ios))
-		throw Error("FBX export failed to open '" + fbxPath + "': " + exporter->GetStatus().GetErrorString());
-	if (!exporter->Export(scene))
-		throw Error("FBX export failed: " + std::string(exporter->GetStatus().GetErrorString()));
-	exporter->Destroy();
+	session.save(fbxPath);
 
 	log(LogLevel::Info, "Wrote " + fbxPath + " (" + std::to_string(m.materials.size()) + " materials, " +
 							std::to_string(clusterCount) + " skinned bones of " + std::to_string(m.bones.size()) + ", " +

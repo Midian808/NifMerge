@@ -8,6 +8,8 @@ using System.Linq;
 using NifMerge;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.Animations;
+using UnityEngine.Playables;
 
 public static class NifMergeHarness
 {
@@ -33,6 +35,7 @@ public static class NifMergeHarness
             AssetDatabase.Refresh();
             RunChecks(outDir);
             CheckOutfit(outDir);
+            CheckAnimations(outDir);
             code = failures == 0 ? 0 : 1;
         }
         catch (Exception e)
@@ -754,6 +757,262 @@ public static class NifMergeHarness
         RenderFace(go, smr, Path.Combine(outDir, "face_oh.png"), new[] { "Oh" });
         RenderFace(go, smr, Path.Combine(outDir, "face_oohq.png"), new[] { "OohQ" });
         for (int i = 0; i < mesh.blendShapeCount; i++) smr.SetBlendShapeWeight(i, 0f);
+    }
+
+    // ---- SkyAnim clips (Assets/NifMergeTest/Anim, Humanoid by default; AnimGeneric reconfigured as Generic).
+    const string AnimDir = "Assets/NifMergeTest/Anim/";
+    const string GenericDir = "Assets/NifMergeTest/AnimGeneric/";
+
+    // Plays a clip on a model's Animator through a PlayableGraph, the way the runtime does (an Animator with a
+    // Humanoid avatar retargets Humanoid clips and applies Generic clips' transform curves directly).
+    sealed class ClipPlayer : IDisposable
+    {
+        PlayableGraph graph;
+        AnimationClipPlayable playable;
+
+        public ClipPlayer(GameObject go, AnimationClip clip)
+        {
+            var animator = go.GetComponent<Animator>();
+            if (animator == null) animator = go.AddComponent<Animator>(); // Unity objects compare to null with ==, not ??
+            animator.applyRootMotion = false;
+            animator.cullingMode = AnimatorCullingMode.AlwaysAnimate; // no camera sees the model in batch mode
+            graph = PlayableGraph.Create("HarnessClip");
+            graph.SetTimeUpdateMode(DirectorUpdateMode.Manual);
+            playable = AnimationClipPlayable.Create(graph, clip);
+            playable.SetApplyFootIK(false);
+            AnimationPlayableOutput.Create(graph, "pose", animator).SetSourcePlayable(playable);
+        }
+
+        public void Sample(float t)
+        {
+            playable.SetTime(t);
+            graph.Evaluate();
+        }
+
+        public void Dispose() => graph.Destroy();
+    }
+
+    static AnimationClip ClipOf(string fbx) =>
+        AssetDatabase.LoadAllAssetsAtPath(fbx).OfType<AnimationClip>().FirstOrDefault(c => !c.name.StartsWith("__preview__"));
+
+    static Dictionary<string, Transform> ByName(GameObject go)
+    {
+        var d = new Dictionary<string, Transform>();
+        foreach (var t in go.GetComponentsInChildren<Transform>(true))
+            if (!d.ContainsKey(t.name)) d.Add(t.name, t);
+        return d;
+    }
+
+    static void CheckAnimations(string outDir)
+    {
+        // Automatic Humanoid import of every clip.
+        foreach (string name in new[] { "mt_walkforward", "mt_runforward", "mt_idle", "bow_release" })
+        {
+            string fbx = AnimDir + name + ".fbx";
+            var sc = AnimSidecar.TryLoad(fbx, out _);
+            var imp = AssetImporter.GetAtPath(fbx) as ModelImporter;
+            Check(sc != null && imp != null, $"{name}: SkyAnim clip and sidecar imported");
+            if (sc == null || imp == null) continue;
+            Check(imp.userData != null && imp.userData.StartsWith("skyanim:"), $"{name}: importer stamped by SkyAnim");
+            Check(imp.animationType == ModelImporterAnimationType.Human, $"{name}: imported as Humanoid");
+            var avatar = AssetDatabase.LoadAllAssetsAtPath(fbx).OfType<Avatar>().FirstOrDefault();
+            Check(avatar != null && avatar.isValid && avatar.isHuman, $"{name}: avatar is valid and human");
+            var clip = ClipOf(fbx);
+            Check(clip != null && clip.name == sc.clip, $"{name}: clip named '{clip?.name}'");
+            if (clip == null) continue;
+            Check(clip.humanMotion, $"{name}: humanoid clip");
+            Check(Mathf.Abs(clip.length - sc.duration) < 0.002f, $"{name}: length {clip.length} s (sidecar {sc.duration})");
+            Check(AnimationUtility.GetAnimationClipSettings(clip).loopTime == sc.loop, $"{name}: loop time {sc.loop}");
+            var events = AnimationUtility.GetAnimationEvents(clip);
+            bool eventsOk = events.Length == sc.events.Length;
+            for (int i = 0; eventsOk && i < events.Length; i++)
+                eventsOk = Mathf.Abs(events[i].time - sc.events[i].time) < 0.002f && events[i].functionName == SkyAnimImporter.EventFunction &&
+                           events[i].stringParameter == sc.events[i].name;
+            Check(eventsOk, $"{name}: {events.Length} events = " + string.Join(", ", events.Select(e => $"{e.stringParameter}@{e.time:0.000}")));
+            var bindings = AnimationUtility.GetCurveBindings(clip);
+            Check(bindings.Any(b => b.path.EndsWith("NPC L ForearmTwist1 [LLt1]")), $"{name}: forearm twist bone animated alongside the muscles");
+        }
+        var walkSc = AnimSidecar.TryLoad(AnimDir + "mt_walkforward.fbx", out _);
+        Check(walkSc != null && walkSc.events.Length == 2 && walkSc.events[0].name == "FootRight", "SE walk carries FootRight/FootLeft");
+        var bowSc = AnimSidecar.TryLoad(AnimDir + "bow_release.fbx", out _);
+        Check(bowSc != null && bowSc.platform == "LE" && bowSc.binding == "by name" && !bowSc.loop, "LE bow binds by name, does not loop");
+
+        // The sidecar's rest pose, converted to Unity space the way the importer does, puts every bone where the
+        // NifMerge character's rest pose has it (the clip models themselves arrive in their first frame's pose).
+        var restCharacter = UnityEngine.Object.Instantiate(AssetDatabase.LoadAssetAtPath<GameObject>(Fbx));
+        try
+        {
+            var chRest = ByName(restCharacter);
+            foreach (string name in new[] { "mt_walkforward", "bow_release" })
+            {
+                var sc = AnimSidecar.TryLoad(AnimDir + name + ".fbx", out _);
+                var model = UnityEngine.Object.Instantiate(AssetDatabase.LoadAssetAtPath<GameObject>(AnimDir + name + ".fbx"));
+                try
+                {
+                    var bones = ByName(model);
+                    float before = 0f, after = 0f;
+                    foreach (var kv in bones)
+                        if (chRest.TryGetValue(kv.Key, out var c) && kv.Key.StartsWith("NPC ")) before = Mathf.Max(before, (c.position - kv.Value.position).magnitude);
+                    foreach (var kv in SkyAnimImporter.RestPose(sc))
+                    {
+                        bones[kv.Key].localPosition = kv.Value.position;
+                        bones[kv.Key].localRotation = kv.Value.rotation;
+                    }
+                    int compared = 0;
+                    foreach (var kv in bones)
+                        if (kv.Value != model.transform && chRest.TryGetValue(kv.Key, out var c))
+                        {
+                            after = Mathf.Max(after, (c.position - kv.Value.position).magnitude);
+                            compared++;
+                        }
+                    Check(sc.rest.Length == bones.Count - 1, $"{name}: sidecar rest covers every bone ({sc.rest.Length})");
+                    bool humanCovered = sc.humanoid.All(h => chRest.ContainsKey(h.bone) && bones.ContainsKey(h.bone));
+                    Check(humanCovered && after < 1e-3f,
+                          $"{name}: sidecar rest pose = the character's rest pose ({compared} bones, worst {after:0.00000} m; the model's own default pose was {before:0.000} m off)");
+                }
+                finally
+                {
+                    UnityEngine.Object.DestroyImmediate(model);
+                }
+            }
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(restCharacter);
+        }
+
+        // Generic: reconfigure the copies through the same entry point the settings page uses.
+        var settings = NifMergeSettings.instance;
+        settings.animationRig = NifMergeSettings.AnimationRig.Generic;
+        foreach (string name in new[] { "mt_walkforward", "bow_release" }) SkyAnimImporter.Configure(GenericDir + name + ".fbx", false);
+        settings.animationRig = NifMergeSettings.AnimationRig.Humanoid;
+
+        var character = AssetDatabase.LoadAssetAtPath<GameObject>(Fbx);
+        foreach (string name in new[] { "mt_walkforward", "bow_release" })
+        {
+            string fbx = GenericDir + name + ".fbx";
+            var imp = AssetImporter.GetAtPath(fbx) as ModelImporter;
+            var clip = ClipOf(fbx);
+            Check(imp != null && imp.animationType == ModelImporterAnimationType.Generic && clip != null && !clip.humanMotion,
+                  $"{name}: Generic copy imported as Generic");
+            if (clip == null) continue;
+            var sc = AnimSidecar.TryLoad(fbx, out _);
+
+            // Every curve of a bone the character has binds on the character (bone paths match NifMerge's).
+            var ch = UnityEngine.Object.Instantiate(character);
+            var anim = UnityEngine.Object.Instantiate(AssetDatabase.LoadAssetAtPath<GameObject>(fbx));
+            try
+            {
+                var chBones = ByName(ch);
+                var animBones = ByName(anim);
+                int bound = 0, missing = 0;
+                foreach (var b in AnimationUtility.GetCurveBindings(clip))
+                {
+                    string bone = b.path.Substring(b.path.LastIndexOf('/') + 1);
+                    if (!chBones.ContainsKey(bone)) continue; // the character's skin uses fewer bones
+                    if (ch.transform.Find(b.path) != null) bound++;
+                    else missing++;
+                }
+                Check(bound > 0 && missing == 0, $"{name}: {bound} curves bind on the character, {missing} do not");
+
+                // Sampled on the character, every shared bone lands where the clip's own skeleton puts it.
+                float worst = 0f, lowestToe = float.MaxValue, headLow = float.MaxValue, headHigh = float.MinValue;
+                var humanFrames = new List<Dictionary<string, Vector3>>();
+                var ownFrames = new List<Dictionary<string, Vector3>>(); // the clip's own skeleton, Generic
+                var times = new List<float>();
+                // A Generic clip plays on a Generic rig: an Animator without a Humanoid avatar (one with an avatar
+                // drives the human bones through muscles only and ignores their transform curves).
+                var chAnimator = ch.GetComponent<Animator>();
+                var chAvatar = chAnimator.avatar;
+                chAnimator.avatar = null;
+                using (var onCharacter = new ClipPlayer(ch, clip))
+                using (var onOwn = new ClipPlayer(anim, clip))
+                for (int f = 0; f < sc.frames; f += Math.Max(1, sc.frames / 12))
+                {
+                    float t = f / sc.fps;
+                    onCharacter.Sample(t);
+                    onOwn.Sample(t);
+                    foreach (var kv in animBones)
+                        if (kv.Value != anim.transform && chBones.TryGetValue(kv.Key, out var c))
+                            worst = Mathf.Max(worst, (c.position - kv.Value.position).magnitude);
+                    lowestToe = Mathf.Min(lowestToe, chBones["NPC L Toe0 [LToe]"].position.y, chBones["NPC R Toe0 [RToe]"].position.y);
+                    float head = chBones["NPC Head [Head]"].position.y;
+                    headLow = Mathf.Min(headLow, head);
+                    headHigh = Mathf.Max(headHigh, head);
+                    var snap = new Dictionary<string, Vector3>();
+                    foreach (var h in sc.humanoid) snap[h.bone] = chBones[h.bone].position;
+                    humanFrames.Add(snap);
+                    ownFrames.Add(sc.humanoid.ToDictionary(h => h.bone, h => animBones[h.bone].position));
+                    times.Add(t);
+                    if (name == "mt_walkforward" && humanFrames.Count <= 3)
+                        Render(ch, Path.Combine(outDir, $"walk_generic_{f:00}.png"), new Vector3(4.6f, 0.95f, 0f), new Vector3(0f, 0.92f, 0f), 30f, 768, 1024);
+                }
+                chAnimator.avatar = chAvatar;
+                chAnimator.Rebind();
+                Check(worst < 1e-4f, $"{name}: Generic playback on the character matches the clip's skeleton (worst {worst:0.000000} m)");
+                Check(headLow > 1.4f && headHigh < 1.9f, $"{name}: head stays at standing height ({headLow:0.00}..{headHigh:0.00} m)");
+                if (name == "mt_walkforward")
+                    Check(lowestToe > -0.03f && lowestToe < 0.03f, $"{name}: planted toe at ground level ({lowestToe:0.000} m)");
+
+                // The Humanoid clip of the same source, retargeted through the character's avatar.
+                var humanClip = ClipOf(AnimDir + name + ".fbx");
+                float worstHuman = 0f, hipsTravel = 0f;
+                string worstBone = "";
+                var hips = chBones["NPC COM [COM ]"];
+                Vector3 hips0 = Vector3.zero;
+                using (var player = new ClipPlayer(ch, humanClip))
+                {
+                    for (int i = 0; i < times.Count; i++)
+                    {
+                        player.Sample(times[i]);
+                        if (i == 0) hips0 = hips.position;
+                        hipsTravel = Mathf.Max(hipsTravel, Vector3.ProjectOnPlane(hips.position - hips0, Vector3.up).magnitude);
+                        foreach (var h in sc.humanoid)
+                        {
+                            if (h.human.Contains("Proximal") || h.human.Contains("Intermediate") || h.human.Contains("Distal")) continue;
+                            float d = (chBones[h.bone].position - humanFrames[i][h.bone]).magnitude;
+                            if (d > worstHuman)
+                            {
+                                worstHuman = d;
+                                worstBone = h.bone;
+                            }
+                        }
+                        if (name == "mt_walkforward" && i < 3)
+                            Render(ch, Path.Combine(outDir, $"walk_humanoid_{i}.png"), new Vector3(4.6f, 0.95f, 0f), new Vector3(0f, 0.92f, 0f), 30f, 768, 1024);
+                    }
+                }
+                // Unity's import of a Humanoid clip loses a little (keyframe reduction): measured as the clip on its
+                // own model against the same clip played Generic there. Retargeting onto the character, whose
+                // avatar matches the clip's (both built from the rest pose), may add at most 1 cm to that.
+                float worstOwn = 0f;
+                var own = UnityEngine.Object.Instantiate(AssetDatabase.LoadAssetAtPath<GameObject>(AnimDir + name + ".fbx"));
+                try
+                {
+                    var ownBones = ByName(own);
+                    using (var player = new ClipPlayer(own, humanClip))
+                        for (int i = 0; i < times.Count; i++)
+                        {
+                            player.Sample(times[i]);
+                            foreach (var h in sc.humanoid)
+                                if (!h.human.Contains("Proximal") && !h.human.Contains("Intermediate") && !h.human.Contains("Distal"))
+                                    worstOwn = Mathf.Max(worstOwn, (ownBones[h.bone].position - ownFrames[i][h.bone]).magnitude);
+                        }
+                }
+                finally
+                {
+                    UnityEngine.Object.DestroyImmediate(own);
+                }
+                Lines.Add($"INFO {name}: Humanoid vs Generic: on the character up to {worstHuman:0.000} m (at {worstBone}), on its own model {worstOwn:0.000} m");
+                Check(worstHuman <= worstOwn + 0.01f,
+                      $"{name}: Humanoid retarget onto the character adds at most 1 cm to the import's own loss ({worstHuman:0.000} vs {worstOwn:0.000} m)");
+                Check(hipsTravel < 0.15f, $"{name}: plays in place (hips travel {hipsTravel:0.000} m)");
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(ch);
+                UnityEngine.Object.DestroyImmediate(anim);
+            }
+        }
     }
 
     static void RenderFace(GameObject go, SkinnedMeshRenderer smr, string path, string[] morphs)

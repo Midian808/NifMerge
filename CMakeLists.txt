@@ -43,8 +43,18 @@ target_include_directories(nifmerge_core PUBLIC src)
 target_link_libraries(nifmerge_core PUBLIC nifly fbxsdk)
 
 # ---- Application (GUI with no arguments, CLI with arguments) ----------------------------------
-add_executable(NifMerge src/app/main.cpp src/app/Gui.cpp)
+add_executable(NifMerge src/app/main.cpp src/app/Gui.cpp src/app/GuiHost.cpp)
 target_link_libraries(NifMerge PRIVATE nifmerge_core imgui shell32 ole32)
+
+# ---- SkyAnim: Skyrim .hkx animation -> FBX (shares the core's skeleton loading and FBX conventions) ----
+add_library(skyanim_core STATIC
+    src/anim/HkxPackfile.cpp src/anim/HkxAnimation.cpp src/anim/ClipPose.cpp src/anim/AnimExport.cpp
+    src/anim/Batch.cpp)
+target_include_directories(skyanim_core PUBLIC src)
+target_link_libraries(skyanim_core PUBLIC nifmerge_core)
+
+add_executable(SkyAnim src/anim_app/main.cpp src/anim_app/AnimGui.cpp src/app/GuiHost.cpp)
+target_link_libraries(SkyAnim PRIVATE skyanim_core imgui shell32 ole32)
 
 # ---- Tests ------------------------------------------------------------------------------------
 enable_testing()

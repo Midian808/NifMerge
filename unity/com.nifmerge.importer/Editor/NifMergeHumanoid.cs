@@ -9,7 +9,14 @@ namespace NifMerge
     // same thing the avatar configurator's "Enforce T-Pose" produces.
     public static class NifMergeHumanoid
     {
-        public static HumanDescription Build(string fbxPath, Sidecar sidecar, List<string> warnings)
+        public static HumanDescription Build(string fbxPath, Sidecar sidecar, List<string> warnings) =>
+            Build(fbxPath, sidecar.humanoid, warnings);
+
+        // From any Skyrim -> Unity bone list (a model's or an animation's sidecar). restLocal, when given,
+        // poses the model first (bone name -> local position and rotation): an animated FBX's model arrives
+        // in its first frame's pose, and the avatar must come from the rest pose to match the character's.
+        public static HumanDescription Build(string fbxPath, HumanoidEntry[] humanoid, List<string> warnings,
+                                             Dictionary<string, (Vector3 position, Quaternion rotation)> restLocal = null)
         {
             var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(fbxPath);
             if (prefab == null) throw new System.InvalidOperationException("NifMerge: cannot load " + fbxPath);
@@ -22,10 +29,21 @@ namespace NifMerge
                 var byName = new Dictionary<string, Transform>();
                 foreach (var t in inst.GetComponentsInChildren<Transform>(true))
                     if (!byName.ContainsKey(t.name)) byName.Add(t.name, t);
+                if (restLocal != null)
+                    foreach (var kv in restLocal)
+                    {
+                        if (!byName.TryGetValue(kv.Key, out var t))
+                        {
+                            warnings.Add($"rest pose names bone '{kv.Key}', which is not in the model");
+                            continue;
+                        }
+                        t.localPosition = kv.Value.position;
+                        t.localRotation = kv.Value.rotation;
+                    }
 
                 var humanToBone = new Dictionary<string, Transform>();
                 var human = new List<HumanBone>();
-                foreach (var h in sidecar.humanoid)
+                foreach (var h in humanoid)
                 {
                     if (!byName.TryGetValue(h.bone, out var t))
                     {

@@ -1,4 +1,5 @@
 #include "Export.hpp"
+#include "TextUtil.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -12,37 +13,9 @@ namespace fs = std::filesystem;
 
 namespace {
 
-std::string Quote(const std::string& s) {
-	std::string r = "\"";
-	for (unsigned char c : s) {
-		switch (c) {
-			case '"': r += "\\\""; break;
-			case '\\': r += "\\\\"; break;
-			case '\n': r += "\\n"; break;
-			case '\r': r += "\\r"; break;
-			case '\t': r += "\\t"; break;
-			default:
-				if (c < 0x20) {
-					char buf[8];
-					snprintf(buf, sizeof buf, "\\u%04x", c);
-					r += buf;
-				}
-				else
-					r += static_cast<char>(c);
-		}
-	}
-	return r + "\"";
-}
-
-std::string Num(double v) {
-	char buf[32];
-	snprintf(buf, sizeof buf, "%.6g", v);
-	return buf;
-}
-
 std::string Arr(const float* v, int n) {
 	std::string r = "[";
-	for (int i = 0; i < n; i++) r += (i ? ", " : "") + Num(v[i]);
+	for (int i = 0; i < n; i++) r += (i ? ", " : "") + JsonNum(v[i]);
 	return r + "]";
 }
 
@@ -73,31 +46,31 @@ void WriteMaterialsJson(const MergedModel& m, const std::string& fbxPath, const 
 	o << "{\n";
 	o << "  \"generator\": \"NifMerge\",\n";
 	o << "  \"formatVersion\": 2,\n";
-	o << "  \"fbx\": " << Quote(fs::u8path(fbxPath).filename().u8string()) << ",\n";
-	o << "  \"metresPerGameUnit\": " << Num(kMetresPerUnit) << ",\n";
+	o << "  \"fbx\": " << JsonQuote(fs::u8path(fbxPath).filename().u8string()) << ",\n";
+	o << "  \"metresPerGameUnit\": " << JsonNum(kMetresPerUnit) << ",\n";
 
 	o << "  \"humanoid\": [\n";
 	bool first = true;
 	for (auto& b : m.bones) {
 		if (b.humanoid.empty()) continue;
-		o << (first ? "" : ",\n") << "    {\"human\": " << Quote(b.humanoid) << ", \"bone\": " << Quote(b.name) << "}";
+		o << (first ? "" : ",\n") << "    {\"human\": " << JsonQuote(b.humanoid) << ", \"bone\": " << JsonQuote(b.name) << "}";
 		first = false;
 	}
 	o << "\n  ],\n";
 
 	o << "  \"blendShapes\": [";
-	for (size_t i = 0; i < m.blendShapes.size(); i++) o << (i ? ", " : "") << Quote(m.blendShapes[i].name);
+	for (size_t i = 0; i < m.blendShapes.size(); i++) o << (i ? ", " : "") << JsonQuote(m.blendShapes[i].name);
 	o << "],\n";
 
 	o << "  \"morphSources\": [\n";
 	for (size_t i = 0; i < m.morphSources.size(); i++) {
 		const MorphSource& s = m.morphSources[i];
-		o << "    {\"file\": " << Quote(fs::u8path(s.file).filename().u8string()) << ", \"shape\": " << Quote(s.shape)
-		  << ", \"mode\": " << Quote(s.mode) << ", \"windowStart\": " << s.windowStart << ", \"median\": " << Num(s.median)
-		  << ", \"p90\": " << Num(s.p90) << ", \"max\": " << Num(s.max)
+		o << "    {\"file\": " << JsonQuote(fs::u8path(s.file).filename().u8string()) << ", \"shape\": " << JsonQuote(s.shape)
+		  << ", \"mode\": " << JsonQuote(s.mode) << ", \"windowStart\": " << s.windowStart << ", \"median\": " << JsonNum(s.median)
+		  << ", \"p90\": " << JsonNum(s.p90) << ", \"max\": " << JsonNum(s.max)
 		  << ", \"sameTriangles\": " << (s.sameTriangles ? "true" : "false") << ", \"morphs\": [";
-		for (size_t k = 0; k < s.morphs.size(); k++) o << (k ? ", " : "") << Quote(s.morphs[k]);
-		o << "], \"outcome\": " << Quote(s.outcome) << "}"
+		for (size_t k = 0; k < s.morphs.size(); k++) o << (k ? ", " : "") << JsonQuote(s.morphs[k]);
+		o << "], \"outcome\": " << JsonQuote(s.outcome) << "}"
 		  << (i + 1 < m.morphSources.size() ? ",\n" : "\n");
 	}
 	o << "  ],\n";
@@ -105,15 +78,15 @@ void WriteMaterialsJson(const MergedModel& m, const std::string& fbxPath, const 
 	o << "  \"parts\": [\n";
 	for (size_t i = 0; i < m.parts.size(); i++) {
 		const PartReport& r = m.parts[i];
-		o << "    {\"file\": " << Quote(fs::u8path(r.file).filename().u8string()) << ", \"role\": " << Quote(r.role)
+		o << "    {\"file\": " << JsonQuote(fs::u8path(r.file).filename().u8string()) << ", \"role\": " << JsonQuote(r.role)
 		  << ", \"head\": " << (r.head ? "true" : "false") << ", \"slots\": [";
 		for (size_t k = 0; k < r.slots.size(); k++) o << (k ? ", " : "") << r.slots[k];
 		o << "], \"removed\": [";
 		for (size_t k = 0; k < r.removed.size(); k++) {
 			const auto& d = r.removed[k];
-			o << (k ? ", " : "") << "{\"shape\": " << Quote(d.shape) << ", \"slot\": " << d.slot
+			o << (k ? ", " : "") << "{\"shape\": " << JsonQuote(d.shape) << ", \"slot\": " << d.slot
 			  << ", \"triangles\": " << d.triangles << ", \"wholeShape\": " << (d.wholeShape ? "true" : "false")
-			  << ", \"by\": " << Quote(fs::u8path(d.by).filename().u8string()) << "}";
+			  << ", \"by\": " << JsonQuote(fs::u8path(d.by).filename().u8string()) << "}";
 		}
 		o << "]}" << (i + 1 < m.parts.size() ? ",\n" : "\n");
 	}
@@ -124,31 +97,31 @@ void WriteMaterialsJson(const MergedModel& m, const std::string& fbxPath, const 
 		const MaterialSlot& s = m.materials[i];
 		o << "    {\n";
 		o << "      \"slot\": " << i << ",\n";
-		o << "      \"name\": " << Quote(s.name) << ",\n";
-		o << "      \"sourceFile\": " << Quote(fs::u8path(s.sourceFile).filename().u8string()) << ",\n";
-		o << "      \"shape\": " << Quote(s.shapeName) << ",\n";
-		o << "      \"role\": " << Quote(s.role) << ",\n";
+		o << "      \"name\": " << JsonQuote(s.name) << ",\n";
+		o << "      \"sourceFile\": " << JsonQuote(fs::u8path(s.sourceFile).filename().u8string()) << ",\n";
+		o << "      \"shape\": " << JsonQuote(s.shapeName) << ",\n";
+		o << "      \"role\": " << JsonQuote(s.role) << ",\n";
 		o << "      \"slots\": [";
 		for (size_t k = 0; k < s.slots.size(); k++) o << (k ? ", " : "") << s.slots[k];
 		o << "],\n";
-		o << "      \"shaderBlock\": " << Quote(s.shaderBlock) << ",\n";
+		o << "      \"shaderBlock\": " << JsonQuote(s.shaderBlock) << ",\n";
 		o << "      \"shaderType\": " << s.shaderType << ",\n";
 		o << "      \"shaderFlags1\": " << s.shaderFlags1 << ",\n";
 		o << "      \"shaderFlags2\": " << s.shaderFlags2 << ",\n";
 		o << "      \"textures\": [";
-		for (size_t t = 0; t < s.textures.size(); t++) o << (t ? ", " : "") << Quote(s.textures[t]);
+		for (size_t t = 0; t < s.textures.size(); t++) o << (t ? ", " : "") << JsonQuote(s.textures[t]);
 		o << "],\n";
 		o << "      \"alphaProperty\": " << (s.hasAlphaProperty ? "true" : "false") << ",\n";
 		o << "      \"alphaFlags\": " << s.alphaFlags << ",\n";
 		o << "      \"alphaThreshold\": " << static_cast<int>(s.alphaThreshold) << ",\n";
-		o << "      \"alpha\": " << Num(s.alpha) << ",\n";
+		o << "      \"alpha\": " << JsonNum(s.alpha) << ",\n";
 		o << "      \"uvOffset\": " << Arr(s.uvOffset, 2) << ",\n";
 		o << "      \"uvScale\": " << Arr(s.uvScale, 2) << ",\n";
-		o << "      \"glossiness\": " << Num(s.glossiness) << ",\n";
+		o << "      \"glossiness\": " << JsonNum(s.glossiness) << ",\n";
 		o << "      \"specularColor\": " << Arr(s.specularColor, 3) << ",\n";
-		o << "      \"specularStrength\": " << Num(s.specularStrength) << ",\n";
+		o << "      \"specularStrength\": " << JsonNum(s.specularStrength) << ",\n";
 		o << "      \"emissiveColor\": " << Arr(s.emissiveColor, 3) << ",\n";
-		o << "      \"emissiveMultiple\": " << Num(s.emissiveMultiple) << ",\n";
+		o << "      \"emissiveMultiple\": " << JsonNum(s.emissiveMultiple) << ",\n";
 		o << "      \"skinTintColor\": " << Arr(s.skinTintColor, 3) << ",\n";
 		o << "      \"hairTintColor\": " << Arr(s.hairTintColor, 3) << ",\n";
 		o << "      \"doubleSided\": " << (s.doubleSided ? "true" : "false") << ",\n";
@@ -157,7 +130,7 @@ void WriteMaterialsJson(const MergedModel& m, const std::string& fbxPath, const 
 			Mat3 t = MsnTexelToUnityMesh(s.skinToRest);
 			o << "      \"msnToMesh\": [";
 			for (int r = 0; r < 3; r++)
-				for (int c = 0; c < 3; c++) o << (r || c ? ", " : "") << Num(std::fabs(t.m[r][c]) < 1e-9 ? 0.0 : t.m[r][c]);
+				for (int c = 0; c < 3; c++) o << (r || c ? ", " : "") << JsonNum(std::fabs(t.m[r][c]) < 1e-9 ? 0.0 : t.m[r][c]);
 			o << "],\n";
 		}
 		o << "      \"vertexColors\": " << (s.vertexColors ? "true" : "false") << ",\n";
@@ -171,9 +144,9 @@ void WriteMaterialsJson(const MergedModel& m, const std::string& fbxPath, const 
 void WriteObj(const MergedModel& m, const std::string& objPath) {
 	std::ostringstream o;
 	o << "# NifMerge rest-pose dump, Skyrim space (Z-up, game units)\n";
-	for (auto& p : m.positions) o << "v " << Num(p.x) << " " << Num(p.y) << " " << Num(p.z) << "\n";
-	for (auto& t : m.uvs) o << "vt " << Num(t[0]) << " " << Num(1.0 - t[1]) << "\n";
-	for (auto& n : m.normals) o << "vn " << Num(n.x) << " " << Num(n.y) << " " << Num(n.z) << "\n";
+	for (auto& p : m.positions) o << "v " << JsonNum(p.x) << " " << JsonNum(p.y) << " " << JsonNum(p.z) << "\n";
+	for (auto& t : m.uvs) o << "vt " << JsonNum(t[0]) << " " << JsonNum(1.0 - t[1]) << "\n";
+	for (auto& n : m.normals) o << "vn " << JsonNum(n.x) << " " << JsonNum(n.y) << " " << JsonNum(n.z) << "\n";
 	int current = -1;
 	for (size_t t = 0; t < m.tris.size(); t++) {
 		if (m.triMaterial[t] != current) {

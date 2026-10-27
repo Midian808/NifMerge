@@ -1,12 +1,13 @@
-"""Unity batch-mode verification of NifMerge output (milestone M3).
+"""Unity batch-mode verification of NifMerge and SkyAnim output (milestones M3 and A5).
 
 For each Unity editor given, this:
   1. creates (once) a scratch Built-in pipeline project under .tmp/unity/<version>,
   2. references the com.nifmerge.importer package from this repo,
   3. runs NifMerge.exe on the user's sample set into Assets/NifMergeTest/Character.fbx, and again
      wearing the sample outfit (dress, boots, thong) into Assets/NifMergeTest/Outfit.fbx,
-  4. writes small DDS test textures at some of the paths the sidecar references,
-  5. opens the project in batch mode (the automatic import path a user hits) and runs
+  4. runs SkyAnim.exe on the sample clips into Assets/NifMergeTest/Anim (plus Generic copies),
+  5. writes small DDS test textures at some of the paths the sidecar references,
+  6. opens the project in batch mode (the automatic import path a user hits) and runs
      NifMergeHarness.Run, which checks the imported result and renders two screenshots.
 
 Usage: python tests/run_unity_harness.py [--unity <Unity.exe> ...]
@@ -24,7 +25,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = Path(os.environ.get("NIFMERGE_BUILD", ROOT / "build"))  # build tree to test
 NIFMERGE = BUILD / "Release" / "NifMerge.exe"
+SKYANIM = BUILD / "Release" / "SkyAnim.exe"
 SAMPLES = ROOT / "samples"
+ANIM = SAMPLES / "animationwork"
 DEFAULT_EDITORS = [
     r"D:\UnityHubFuckery\6000.0.68f1\Editor\Unity.exe",
     r"D:\UnityHubFuckery\2022.3.61f1\Editor\Unity.exe",
@@ -124,6 +127,22 @@ def harness(unity: Path) -> bool:
             print(f"[{version}] NifMerge failed")
             return False
 
+    # SkyAnim clips for the same character skeleton: the SE walk, run and idle (nameless tracks, bound by
+    # index) and the LE bow release (named tracks, bound by name). Walk and bow also go to AnimGeneric,
+    # which the harness reconfigures as Generic to check exact playback on the character.
+    anim_dir, generic_dir = assets / "NifMergeTest" / "Anim", assets / "NifMergeTest" / "AnimGeneric"
+    cmd = [SKYANIM, "export", "--skeleton", SAMPLES / "skeleton_female.nif", "--hkx", ANIM / "SSE" / "skeleton_female.hkx",
+           ANIM / "SSE" / "mt_walkforward.hkx", ANIM / "SSE" / "mt_runforward.hkx", ANIM / "SSE" / "mt_idle.hkx",
+           ANIM / "LE" / "bow_release.hkx", "--out", anim_dir]
+    if run(cmd) != 0:
+        print(f"[{version}] SkyAnim failed")
+        return False
+    generic_dir.mkdir(parents=True)
+    for name in ("mt_walkforward", "bow_release"):
+        for ext in (".fbx", ".anim.json"):
+            shutil.copy(anim_dir / (name + ext), generic_dir / (name + ext))
+    (anim_dir / "batch_report.json").unlink()
+
     sidecar = json.loads(fbx.with_name("Character.materials.json").read_text())
     mats = sidecar["materials"]
     body, hair, head = role(mats, "body"), role(mats, "hair"), role(mats, "head")
@@ -170,8 +189,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--unity", action="append", help="Unity.exe to test with (repeatable)")
     args = ap.parse_args()
-    if not NIFMERGE.exists():
-        sys.exit(f"Build first: {NIFMERGE} missing")
+    for exe in (NIFMERGE, SKYANIM):
+        if not exe.exists():
+            sys.exit(f"Build first: {exe} missing")
     editors = [Path(u) for u in (args.unity or DEFAULT_EDITORS)]
     results = {}
     for u in editors:

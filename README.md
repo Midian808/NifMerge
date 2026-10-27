@@ -111,6 +111,31 @@ NifMerge gui [same options as merge] [--go] [--exit-when-done] [--write-layout <
 `inspect --skeleton` prints, for each skinned shape, the skin→world transform each of its bones
 implies. When every bone agrees, the shape is bound consistently to that skeleton.
 
+## SkyAnim: Skyrim animations to FBX
+
+`build\Release\SkyAnim.exe` turns Skyrim animation clips (`.hkx`, LE and SE) into FBX animation for
+the characters NifMerge builds. Drag the character's `skeleton.nif` and its Havok `skeleton.hkx` onto the
+window, then the clips or whole animation folders, pick an output folder and press **Go!**. Files are
+recognised by content; folders are searched recursively and their subfolders mirrored in the output. Each
+clip becomes `<clip>.fbx` (the skeleton with one animation take) and `<clip>.anim.json` (events, loop
+flag, Humanoid map), and the run writes `batch_report.json`. A clip that fails is reported and the others
+still export.
+
+In Unity, the same package imports these automatically: Humanoid by default (retargetable; set
+*Project Settings > NifMerge Importer > SkyAnim animations import as* to Generic for exact playback on a
+Generic-rigged character built from the same skeleton). The clip is named after the source, loops when its
+first and last frames match, plays in place, and Skyrim's annotations (`FootLeft`, `arrowRelease`,
+`SoundPlay.WPNBowFire`, ...) become animation events calling `OnSkyrimEvent(string)`.
+
+```
+SkyAnim export [--skeleton <skeleton.nif>] [--hkx <skeleton.hkx>] <file|folder>... --out <folder>
+SkyAnim inspect <file.hkx>
+SkyAnim scan <folder> [--list <encoding>]
+```
+
+Design, findings and known gaps (XML tagfiles, additive clips):
+[docs/ANIM_DESIGN.md](docs/ANIM_DESIGN.md).
+
 ## Building
 
 Requirements: Visual Studio 2022 (MSVC, bundled CMake), Autodesk FBX SDK 2020.3.x
@@ -131,6 +156,13 @@ Set `NIFMERGE_BUILD=<build dir>` to point the Python tests at a build tree other
 | `build\tests\Release\core_tests.exe` | Re-pose vs. an independent evaluation of the game's skinning formula (nifly math) on every sample and fixture; FaceGen part placement; weight blending; seam-continuous normals; merge invariants; FBX read-back (geometry, materials, bind pose = rest pose); TRI decoding; morph-to-part matching decisions; exact reproduction of matched morphs; surface transfer (left/right consistency against the source masks' own, locality); blend shapes surviving the FBX round trip; outfit: each sample item replacing or adding exactly what its slots say, the head's eyes, mouth and brows kept, everything left visible unchanged, seam-continuous normals when dressed, two items in one slot rejected, and (with nifly-written stand-ins) a helmet hiding only the hair and per-partition hiding of a body split into two slots; Skyrim LE (stream 83): the game's own LE male body, hands, feet and head merged (materials, partitions, seam normals), an LE cuirass worn with its effect-shader glow, LE eyes' `.tri` morphs reproduced exactly, the game's male masks on the LE head, an `NiTriStrips` copy of an LE body merging identically to the original, and the sample character, FaceGen head and outfit backported to LE (by nifly's `OptimizeFor`, the conversion SSE NIF Optimizer runs), alone and mixed with SE files, merging as the SE set does. |
 | `python tests\run_gui_test.py` | Drives the real GUI (`gui --go`, the character wearing the sample outfit) and checks its output is identical to the CLI's, plus exit codes and a window screenshot. Then builds the same character by real drag and drop (`gui_input`: OLE drags, as from Explorer, onto each section, and a real click on Go!) and checks that output is identical too, which only holds if every file landed in the section it was dropped on. It moves the mouse, so leave it alone while it runs. |
 | `python tests\run_unity_harness.py` | Batch-mode Unity (6000.0 and 2022.3): automatic import → valid Humanoid avatar, every bone mapping, 12 materials (Skyrim Skin on skin slots, Standard elsewhere), skin specular (the `_s` mask assigned and imported as data, colour × strength and glossiness carried over, and a rendered quad matching Skyrim's specular formula at two light angles, in Gamma and Linear colour space), texture resolution, normal-map conversion, model-space → tangent-space bake of the user's real `_msn` maps (round-trip, agreement with Unity's mesh normals, no added seams), orientation/scale, bind-pose skinning, T-pose reference, retargeting vs. a canonical T-pose rig, blend shapes (all imported, at rest when zeroed, blinks on the correct side, `Aah` opens the mouth, head-only), screenshots including face close-ups. A second model wears the sample outfit: Humanoid, the replaced parts absent, every material built, the items' normal maps converted and alpha modes set, the dress's body copy baked from its `_msn` map. |
+| `build\tests\Release\anim_tests.exe` | SkyAnim: LE and SE packfile layouts, skeletons, every sample clip decoded (frames, encodings, events), still tracks at the reference pose, binding by name / index / explicit map (including a map made for another skeleton variant), uncompressed and float-track clips, additive and XML files refused, the pose on the NIF skeleton (rest = NifMerge's, feet on the ground, loop flags), FBX read-back of every bone at every frame, batch mode (classification, mirrored output, failure isolation, report, skeleton ambiguity, collisions). |
+| `python tests\run_anim_oracle.py` | SkyAnim's decoder against an independent Python decoder (`tests/hkx_oracle`) on every sample clip, frame by frame, plus block end offsets, the smallest-three property and block seams. |
+| `python tests\run_anim_gui_test.py` | The SkyAnim GUI: `--go` output identical to the CLI's, real drag and drop of the skeleton files and an animations folder plus a click on Go! identical too, exit code 1 when a clip fails. It moves the mouse. |
+
+`run_unity_harness.py` also imports SkyAnim clips (SE walk, run, idle; LE bow) for the sample character
+and plays them on it: Humanoid and Generic import, events, loop flags, twist bones, exact Generic playback,
+Humanoid playback in place and as faithful as the clip on its own model (avatar built from the rest pose).
 
 The tests need two sets of Skyrim assets, and neither is committed, because the repository may not
 redistribute them. A missing fixture fails the tests.
@@ -143,6 +175,11 @@ redistribute them. A missing fixture fails the tests.
   `.tri` files for the head parts (female and male, vanilla and in `trifiles/HPH` High Poly Head),
   and `clothing/`: an outfit as `_0`/`_1` pairs: `Dress/01_LatexDress` (slot 32, with its own body
   copy), `Boots/02_HighBoots` (slot 37) and `Thong/03_String` (slot 52).
+- `samples/animationwork/`: SkyAnim's set: `LE/` and `SSE/` each with `skeleton_female.nif` and `.hkx`
+  and the clips `mt_idle`, `mt_walkforward`, `mt_runforward` (LE also `bow_release` and
+  `defaultfemale.hkx`), and `coverage/`: mod clips using the encodings those lack (`interleaved`,
+  `explicit_binding_agrees`, `explicit_binding_other_skeleton`, `float_tracks`, `additive`,
+  `xml_tagfile`).
 
 ## Third-party code
 

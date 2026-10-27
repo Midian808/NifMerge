@@ -93,6 +93,48 @@ struct Mat3 {
 	}
 };
 
+// Unit rotation quaternion (x, y, z, w), w the scalar part. Same rotation convention as Mat3:
+// toMat3() * v rotates v.
+struct Quat {
+	double x = 0, y = 0, z = 0, w = 1;
+	Quat() = default;
+	Quat(double x_, double y_, double z_, double w_) : x(x_), y(y_), z(z_), w(w_) {}
+	double dot(const Quat& o) const { return x * o.x + y * o.y + z * o.z + w * o.w; }
+	Quat normalized() const {
+		double l = std::sqrt(dot(*this));
+		return l > 1e-12 ? Quat(x / l, y / l, z / l, w / l) : Quat();
+	}
+	// Angle between the two rotations, radians (q and -q are the same rotation).
+	double angleTo(const Quat& o) const { return 2.0 * std::acos(std::fmin(1.0, std::fabs(dot(o)))); }
+	Mat3 toMat3() const {
+		Mat3 r;
+		r.m[0] = {1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)};
+		r.m[1] = {2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)};
+		r.m[2] = {2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)};
+		return r;
+	}
+	// From a proper rotation matrix (Shepperd's method: pivot on the largest diagonal term).
+	static Quat fromMat3(const Mat3& r) {
+		const auto& m = r.m;
+		double tr = m[0][0] + m[1][1] + m[2][2];
+		Quat q;
+		if (tr > 0) {
+			double s = std::sqrt(tr + 1.0) * 2;
+			q = {(m[2][1] - m[1][2]) / s, (m[0][2] - m[2][0]) / s, (m[1][0] - m[0][1]) / s, 0.25 * s};
+		} else if (m[0][0] > m[1][1] && m[0][0] > m[2][2]) {
+			double s = std::sqrt(1.0 + m[0][0] - m[1][1] - m[2][2]) * 2;
+			q = {0.25 * s, (m[0][1] + m[1][0]) / s, (m[0][2] + m[2][0]) / s, (m[2][1] - m[1][2]) / s};
+		} else if (m[1][1] > m[2][2]) {
+			double s = std::sqrt(1.0 + m[1][1] - m[0][0] - m[2][2]) * 2;
+			q = {(m[0][1] + m[1][0]) / s, 0.25 * s, (m[1][2] + m[2][1]) / s, (m[0][2] - m[2][0]) / s};
+		} else {
+			double s = std::sqrt(1.0 + m[2][2] - m[0][0] - m[1][1]) * 2;
+			q = {(m[0][2] + m[2][0]) / s, (m[1][2] + m[2][1]) / s, 0.25 * s, (m[1][0] - m[0][1]) / s};
+		}
+		return q.normalized();
+	}
+};
+
 struct Xform {
 	Mat3 L;
 	Vec3 t;
