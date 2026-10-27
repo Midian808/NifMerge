@@ -65,6 +65,8 @@ struct MaterialSlot {
 	Mat3 skinToRest; // skin space (where a model-space normal map lives) -> rest pose, Skyrim axes
 	bool vertexColors = false;
 	bool vertexAlpha = false;
+	std::string role = "character"; // "character" (the person) or "outfit" (an item worn)
+	std::vector<uint16_t> slots;     // body slots (dismember partition IDs) of its triangles, ascending
 };
 
 using VertexWeights = std::vector<std::pair<int, float>>; // (bone index, weight), sorted by weight desc
@@ -77,6 +79,7 @@ struct PosedShape {
 	std::vector<std::array<float, 2>> uvs;
 	std::vector<std::array<float, 4>> colors; // empty when the shape has none
 	std::vector<std::array<uint32_t, 3>> tris;
+	std::vector<uint16_t> triSlots; // body slot (dismember partition ID) per triangle, 0 when none
 	std::vector<VertexWeights> weights;
 };
 
@@ -87,9 +90,10 @@ struct PartInput {
 
 struct MergeRequest {
 	std::string skeletonPath;
-	std::vector<PartInput> parts;
+	std::vector<PartInput> parts;        // the character: body, hands, feet, head
 	double weight = 50.0;               // Skyrim NPC weight, 0..100
 	std::vector<std::string> morphPaths; // .tri files or folders of them (searched recursively)
+	std::vector<PartInput> outfit;       // items worn; each replaces the character's triangles in the body slots it takes
 };
 
 struct OutBone {
@@ -119,6 +123,22 @@ struct MorphSource {
 	std::string outcome; // "applied", or why not
 };
 
+// One input file (a weight pair counts once) and what the outfit rule did with it.
+struct PartReport {
+	std::string file;            // the _0 file, or the only file
+	std::string role;            // "character" or "outfit"
+	std::vector<uint16_t> slots; // body slots across its shapes, ascending
+	bool head = false;           // holds head-part partitions (IDs of 100 and more): only its hair reacts to items
+	struct Removal {
+		std::string shape;
+		uint16_t slot = 0;
+		size_t triangles = 0;
+		bool wholeShape = false; // the shape had no other triangles and is left out
+		std::string by;          // the outfit file that takes the slot
+	};
+	std::vector<Removal> removed; // character parts: what the outfit hid
+};
+
 struct MergedModel {
 	std::vector<OutBone> bones; // parents precede children
 	std::vector<MaterialSlot> materials;
@@ -132,6 +152,7 @@ struct MergedModel {
 	std::vector<std::pair<uint32_t, uint32_t>> materialVertices; // per slot: first vertex, vertex count
 	std::vector<BlendShape> blendShapes;
 	std::vector<MorphSource> morphSources;
+	std::vector<PartReport> parts; // character parts first, then the outfit, in input order
 };
 
 } // namespace nm

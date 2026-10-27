@@ -102,6 +102,23 @@ void WriteMaterialsJson(const MergedModel& m, const std::string& fbxPath, const 
 	}
 	o << "  ],\n";
 
+	o << "  \"parts\": [\n";
+	for (size_t i = 0; i < m.parts.size(); i++) {
+		const PartReport& r = m.parts[i];
+		o << "    {\"file\": " << Quote(fs::u8path(r.file).filename().u8string()) << ", \"role\": " << Quote(r.role)
+		  << ", \"head\": " << (r.head ? "true" : "false") << ", \"slots\": [";
+		for (size_t k = 0; k < r.slots.size(); k++) o << (k ? ", " : "") << r.slots[k];
+		o << "], \"removed\": [";
+		for (size_t k = 0; k < r.removed.size(); k++) {
+			const auto& d = r.removed[k];
+			o << (k ? ", " : "") << "{\"shape\": " << Quote(d.shape) << ", \"slot\": " << d.slot
+			  << ", \"triangles\": " << d.triangles << ", \"wholeShape\": " << (d.wholeShape ? "true" : "false")
+			  << ", \"by\": " << Quote(fs::u8path(d.by).filename().u8string()) << "}";
+		}
+		o << "]}" << (i + 1 < m.parts.size() ? ",\n" : "\n");
+	}
+	o << "  ],\n";
+
 	o << "  \"materials\": [\n";
 	for (size_t i = 0; i < m.materials.size(); i++) {
 		const MaterialSlot& s = m.materials[i];
@@ -110,6 +127,10 @@ void WriteMaterialsJson(const MergedModel& m, const std::string& fbxPath, const 
 		o << "      \"name\": " << Quote(s.name) << ",\n";
 		o << "      \"sourceFile\": " << Quote(fs::u8path(s.sourceFile).filename().u8string()) << ",\n";
 		o << "      \"shape\": " << Quote(s.shapeName) << ",\n";
+		o << "      \"role\": " << Quote(s.role) << ",\n";
+		o << "      \"slots\": [";
+		for (size_t k = 0; k < s.slots.size(); k++) o << (k ? ", " : "") << s.slots[k];
+		o << "],\n";
 		o << "      \"shaderBlock\": " << Quote(s.shaderBlock) << ",\n";
 		o << "      \"shaderType\": " << s.shaderType << ",\n";
 		o << "      \"shaderFlags1\": " << s.shaderFlags1 << ",\n";

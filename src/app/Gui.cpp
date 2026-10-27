@@ -88,6 +88,12 @@ struct LogLine {
 struct AppState {
 	std::string skeleton;
 	std::vector<std::string> partFiles; // as added; paired for display and for the run
+	std::vector<std::string> outfitFiles; // outfit items, as added
+	int selectedOutfit = -1;
+	// What each outfit item does, recomputed when either list changes (see OutfitLines).
+	std::vector<std::string> outfitKey;
+	std::vector<std::string> outfitLines;
+	std::string outfitError;
 	std::vector<std::string> morphPaths; // .tri files and folders
 	int selectedMorph = -1;
 	int selectedPart = -1;
@@ -146,6 +152,33 @@ void AddFiles(const std::vector<std::string>& files) {
 	}
 	if (g_app.output.empty() && !g_app.partFiles.empty())
 		g_app.output = (fs::u8path(g_app.partFiles.front()).parent_path() / "Character.fbx").u8string();
+}
+
+void AddOutfitFiles(const std::vector<std::string>& files) {
+	for (const auto& f : files) {
+		std::string ext = fs::u8path(f).extension().u8string();
+		for (auto& c : ext) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+		if (ext == ".nif") g_app.outfitFiles.push_back(f);
+		else g_app.Log(nm::LogLevel::Warning, "Ignored (not a .nif): " + f);
+	}
+}
+
+// One line per outfit item saying what it replaces, read from the files' body slots. Recomputed only
+// when the parts or the outfit change.
+void UpdateOutfitLines() {
+	std::vector<std::string> key = g_app.partFiles;
+	key.push_back("|");
+	key.insert(key.end(), g_app.outfitFiles.begin(), g_app.outfitFiles.end());
+	if (key == g_app.outfitKey) return;
+	g_app.outfitKey = key;
+	g_app.outfitLines.clear();
+	g_app.outfitError.clear();
+	try {
+		g_app.outfitLines = nm::DescribeOutfit(nm::PairPartFiles(g_app.partFiles), nm::PairPartFiles(g_app.outfitFiles));
+	}
+	catch (const std::exception& e) {
+		g_app.outfitError = e.what();
+	}
 }
 
 // ---- File dialogs ------------------------------------------------------------------------------
@@ -215,6 +248,7 @@ void StartRun() {
 	nm::RunOptions opt;
 	opt.request.skeletonPath = g_app.skeleton;
 	opt.request.parts = nm::PairPartFiles(g_app.partFiles);
+	opt.request.outfit = nm::PairPartFiles(g_app.outfitFiles);
 	opt.request.weight = g_app.weight;
 	opt.request.morphPaths = g_app.morphPaths;
 	opt.fbxPath = g_app.output;
@@ -295,6 +329,48 @@ void DrawUi(HWND hwnd) {
 	if (ImGui::Button("Clear")) {
 		g_app.partFiles.clear();
 		g_app.selectedPart = -1;
+	}
+
+	ImGui::SeparatorText("Outfit (optional)");
+	ImGui::TextDisabled("Clothing and armour the character wears. Each item replaces the character's parts in the body "
+						"slots it takes (a dress replaces the body, boots the feet); other items are added on top.");
+	UpdateOutfitLines();
+	auto outfit = nm::PairPartFiles(g_app.outfitFiles);
+	if (ImGui::BeginListBox("##outfit", ImVec2(-FLT_MIN, ImGui::GetTextLineHeightWithSpacing() * 5))) {
+		for (int i = 0; i < static_cast<int>(outfit.size()); i++) {
+			std::string label = fs::u8path(outfit[i].path0).filename().u8string();
+			if (outfit[i].path1) label += "  +  " + fs::u8path(*outfit[i].path1).filename().u8string() + "   (weight pair)";
+			label += "##o" + std::to_string(i);
+			if (ImGui::Selectable(label.c_str(), g_app.selectedOutfit == i)) g_app.selectedOutfit = i;
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", outfit[i].path0.c_str());
+			if (i < static_cast<int>(g_app.outfitLines.size())) { // "Outfit: <files> takes slot N: replaces ..."
+				const std::string& line = g_app.outfitLines[i];
+				const std::string prefix = "Outfit: ";
+				ImGui::TextDisabled("      %s", line.rfind(prefix, 0) == 0 ? line.c_str() + prefix.size() : line.c_str());
+			}
+		}
+		ImGui::EndListBox();
+	}
+	if (!g_app.outfitError.empty()) ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1), "%s", g_app.outfitError.c_str());
+	if (ImGui::Button("Add files...##outfit")) AddOutfitFiles(OpenFiles(hwnd, true, L"Add outfit item nifs"));
+	ImGui::SameLine();
+	ImGui::BeginDisabled(g_app.selectedOutfit < 0 || g_app.selectedOutfit >= static_cast<int>(outfit.size()));
+	if (ImGui::Button("Remove##outfit")) {
+		const auto& p = outfit[g_app.selectedOutfit];
+		auto same = [](const std::string& a, const std::string& b) {
+			return fs::u8path(a).lexically_normal() == fs::u8path(b).lexically_normal();
+		};
+		auto& files = g_app.outfitFiles;
+		files.erase(std::remove_if(files.begin(), files.end(),
+								   [&](const std::string& f) { return same(f, p.path0) || (p.path1 && same(f, *p.path1)); }),
+					files.end());
+		g_app.selectedOutfit = -1;
+	}
+	ImGui::EndDisabled();
+	ImGui::SameLine();
+	if (ImGui::Button("Clear##outfit")) {
+		g_app.outfitFiles.clear();
+		g_app.selectedOutfit = -1;
 	}
 
 	ImGui::SeparatorText("Facial morphs (.tri, optional)");
@@ -441,6 +517,7 @@ int RunGui(const GuiInit& init) {
 	ImGui_ImplDX11_Init(g_device, g_context);
 
 	AddFiles(init.files);
+	AddOutfitFiles(init.outfit);
 	for (auto& p : init.morphPaths) AddMorphPath(p);
 	if (!init.skeleton.empty()) g_app.skeleton = init.skeleton;
 	if (!init.output.empty()) g_app.output = init.output;

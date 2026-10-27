@@ -154,7 +154,7 @@ They must be carried byte-exact.
 **A single native Windows app, C++17**, with nifly vendored as source:
 
 ```
-inputs (skeleton.nif, part NIFs, weight)
+inputs (skeleton.nif, part NIFs, outfit item NIFs, weight)
   → Load        nifly: shapes, verts (FaceGen BSDynamicTriShape: from the dynamic block), normals,
                 UVs, tris, bone list, weights, skin-to-bone, shader/alpha
   → Resolve     bone-name aliases ("Head" → "NPC Head [Head]"); every used bone must exist in the
@@ -162,11 +162,13 @@ inputs (skeleton.nif, part NIFs, weight)
   → Re-pose     v_rest = Σ w·(SkelWorld ∘ SkinToBone)(v) per vertex; stored normals by the
                 inverse-transpose of the same blend
   → Weight      lerp the re-posed _0/_1 pairs (vertex and triangle lists must match)
+  → Outfit      items take the body slots of their partitions; character triangles in a taken slot
+                are hidden (per partition; a head's hair only), §2.3
   → Merge       one mesh, one submesh per shape; bone set = used bones + Humanoid-mapped bones + all
                 their ancestors; vertex weights normalised
   → Normals     shapes that store none (model-space-normal-mapped skin) get area-weighted normals
                 accumulated by position, so UV seams and the neck, wrist and ankle part seams shade
-                continuously
+                continuously; hidden triangles are removed afterwards
   → Write FBX   Y-up metres ((x, y, z) → (-x, z, y) × 0.0142875); bone hierarchy (scale baked out,
                 §1.6); one mesh node "<name>_Mesh" (never the file's name, which Unity gives the
                 root); skin clusters (bind = skeleton world) + FbxPose bind pose; per-control-point
@@ -373,6 +375,106 @@ failed with them (median 9.29° against the source's 7.72°) and passes without 
   vertices there); the back of the head untouched; full-shape FBX round trip within 2 µm.
 - Unity: all 93 imported by name, zero weights leave the mesh at rest, blink side and direction,
   `Aah` below the eyes and moving down, every morph confined to head parts, face renders.
+
+### 2.3 Clothing (built)
+
+**Goal.** A character is generated wearing an outfit; nothing is swapped at runtime. Items are merged
+like any other part, except that an item replaces the character's own triangles in the body slots it
+takes, the way the game hides the naked body under armour.
+
+**What the NIFs say** (measured on `samples/clothing`; the `_0` and `_1` files agree):
+
+| File | Slots (dismember partitions) | Holds | In game |
+|---|---|---|---|
+| `femalebody` | 32 | body + its genitals | the naked body |
+| `femalehands` | 33 | hands | |
+| `femalefeet` | 37 | feet | |
+| Dress | 32 | the dress **and its own copy of the body** (all three body shapes) | replaces the body |
+| Boots | 37 | boots only, no foot inside | replace the feet; the body's legs stay inside them |
+| Thong | 52 | the thong | added over the body |
+| FaceGen `Head.nif` | eyes, mouth, brows 32; hair, hairline 31; head 130/143/230; scalp 131/141 | head parts | not armour: hidden only through hair |
+
+- The dress's body copy has the body's triangles and vertex order. 7,740 chest vertices (heights
+  87.6–107.5) are reshaped by up to 2.1 units to fit the dress, 690 of them visible at its edges, and
+  its UVs differ by at most 0.004. The game shows this copy, so the merge uses it, not the character's body.
+- The boots sit about 1.1 units outside the legs (heights 0.2–55.9), weighted to the thigh, calf and
+  foot bones. The thong sits 0.2–1.2 outside the hips.
+- Slots 30–61 are biped slots. The head's 130 and above are dismemberment IDs, which no item takes.
+- The plugin's armour records are the real authority on an item's slots; the NIF's partitions must
+  match them (community guides: a mismatch makes the armour invisible). No plugin is read, so the
+  NIF's slots stand in for them.
+
+**The rule** (`PlanOutfit` in `Merge.cpp`, the one implementation behind the merge and the GUI preview).
+1. Inputs are two lists: the **character** (body, hands, feet, head) and the **outfit** (items).
+   Separate lists are required: the body and the dress both declare slot 32, and nothing in either
+   file says which one is the skin.
+2. Every outfit item is merged. It takes the biped slots (30–61) of its partitions. An item with
+   none is added, with a warning.
+3. **Hiding is per partition** (decided; no source found states the engine's own rule). In a
+   character shape, the triangles in a taken slot are removed, with
+   the vertices no remaining triangle uses. A shape left with no triangles leaves the model and its
+   material slot, and takes no part in material naming (the dress's body copy is `3BA`, not `3BA_2`).
+   Every sample shape has a single partition, so the dress removes `femalebody`'s three shapes whole
+   and the boots remove `femalefeet`. Hands stay.
+4. **Head exception.** A part with a head-part partition (an ID of 100 or more) is a head. Only its
+   hair (slot 31) reacts to items: a helmet taking 31 hides the hair. Its eyes, mouth and brows carry
+   slot 32 but are head parts, not armour, so a dress never removes them.
+5. Two outfit items taking one slot is an error naming both. An item taking a slot no character part
+   uses is simply added (the thong).
+6. **Normals come from the surface as worn.** A shape the outfit replaces entirely does not count: the
+   item's own surface takes its place. Measured: with your body counted, the dress's body copy and
+   the hands differed at one wrist vertex per side (normals 0.85 against 0.88 in X), because the copy
+   and your body are not identical there. A shape only partly hidden counts in full: hiding a partition
+   cuts no seam into the surface, so what stays visible shades exactly as without the outfit. Hidden
+   triangles are removed after the normals are computed.
+7. Weight pairs (whose `_0`/`_1` partitions must agree), re-posing, materials and morphs are unchanged:
+   items are parts. The dress's body copy is skin with a model-space normal map, handled like the body.
+
+Result on the sample set, wearing all three: 14 material slots. The dress replaces `femalebody`'s
+`3BA`, `3BA_Vagina` and `3BA_Anus`; the boots replace `Feet`; the thong is added; the hands and the
+whole head are kept.
+
+**Surfaces.**
+- Core: `MergeRequest::outfit`. Each triangle's slot is read from nifly's `GetShapePartitions`
+  while loading (`ReadShapeSlots` reads only the slots). Each material records its `role` (character
+  or outfit) and `slots`. `MergedModel::parts` records each input file's role, slots, whether it is a
+  head, and every removal (shape, slot, triangles, whole shape, by which item).
+- CLI: `--wear <nif>` (repeatable, paired like `--part`); `gui … --go` takes it too.
+- GUI: an **Outfit** list with add, remove, clear and pairing. Under each item, a dimmed line from
+  `DescribeOutfit` (the same rule, read from the files' slots alone) says what it replaces or that it
+  is added; a slot clash shows in red before Go!.
+- Sidecar (still formatVersion 2; the fields are additions): `parts`, and `role` and `slots` per
+  material. The Unity package's sidecar mirror has the same fields. Its importer is unchanged: the
+  items are Standard materials with tangent-space normal maps and alpha, which it already handles.
+- The test harnesses find the body as the skin-tinted slot in body slot 32 (the character's own or an
+  outfit's body copy), no longer by file name.
+
+**Tests** (all on the real sample files):
+- Core:
+  - Dress: the character's three body shapes are removed whole, and the dress and its body copy are
+    present. The body copy equals the dress file re-posed. Hands, feet and every head shape are
+    unchanged, including the FaceGen eyes, mouth and brows. Vertices where hands or feet meet the
+    item's surface get their normals from it, so only their positions and UVs are compared.
+  - Boots: the feet are removed in slot 37; the body (legs inside the boots) and hands are unchanged.
+  - Thong: added in slot 52, nothing removed.
+  - All three together: 14 slots, and seam-continuous normals at the wrists and neck. The GUI preview
+    equals the merge log. The sidecar records the removals and each material's role and slots.
+  - Two slot-32 items (the dress, plus the body file given as an item): an error naming both and the
+    slot.
+  - Helmet: no helmet sample, so the thong is re-partitioned to slot 31 with nifly into `.tmp/tests`.
+    Wearing it hides exactly the two hair shapes and leaves every other shape unchanged.
+  - Per partition: no sample shape spans two slots, so a copy of the body has its triangles below the
+    knee re-partitioned to slot 38, and a copy of the boots takes 37 + 38. Wearing them removes
+    exactly those triangles and their unused vertices, keeps the rest of the body unchanged
+    (positions, normals, UVs), and removes the feet whole.
+- GUI test: the character wears all three items, and the GUI's FBX and sidecar equal the CLI's.
+- Unity (6000.0.68 and 2022.3.61): a second model wears all three items. Checks: Humanoid valid; the
+  replaced parts absent; every material a Standard `.mat`; the items' diffuse assigned, normal maps
+  converted and alpha modes set; the dress's body copy baked from `femalebody_1_msn.dds`; bind-pose
+  skinning exact; `outfit_bind_pose.png` rendered.
+
+**Test data gap.** The hair rule is tested only with a re-partitioned stand-in. A real helmet NIF in
+`samples/clothing` would let the test use real data.
 
 ## 5. Open questions (asked one at a time)
 

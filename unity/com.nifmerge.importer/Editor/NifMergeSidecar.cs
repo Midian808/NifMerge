@@ -14,6 +14,7 @@ namespace NifMerge
         public float metresPerGameUnit;
         public HumanoidEntry[] humanoid;
         public string[] blendShapes; // facial morph names, as imported onto the mesh
+        public PartEntry[] parts;    // each input file, character or outfit, and what the outfit removed
         public MaterialEntry[] materials;
 
         public const string Generator = "NifMerge";
@@ -52,12 +53,34 @@ namespace NifMerge
     }
 
     [Serializable]
+    public class PartEntry
+    {
+        public string file;
+        public string role; // "character" or "outfit"
+        public bool head;   // a head: only its hair reacts to outfit items
+        public int[] slots; // body slots (dismember partition IDs) across its shapes
+        public RemovalEntry[] removed;
+    }
+
+    [Serializable]
+    public class RemovalEntry
+    {
+        public string shape;
+        public int slot;
+        public int triangles;
+        public bool wholeShape;
+        public string by; // the outfit file that takes the slot
+    }
+
+    [Serializable]
     public class MaterialEntry
     {
         public int slot;
         public string name;
         public string sourceFile;
         public string shape;
+        public string role; // "character" or "outfit"
+        public int[] slots; // body slots of its triangles
         public string shaderBlock;
         public long shaderType;
         public long shaderFlags1;

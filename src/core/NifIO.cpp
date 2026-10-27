@@ -140,6 +140,35 @@ Skeleton LoadSkeleton(const std::string& path) {
 	return skel;
 }
 
+// Body slot of each triangle, from the shape's dismember partitions (0 when it has none).
+std::vector<uint16_t> TriangleSlots(NifFile& nif, NiShape* shape, size_t triangles, const std::string& label) {
+	std::vector<uint16_t> slots(triangles, 0);
+	NiVector<BSDismemberSkinInstance::PartitionInfo> partitions;
+	std::vector<int> triParts;
+	if (!nif.GetShapePartitions(shape, partitions, triParts)) return slots;
+	if (triParts.size() != triangles)
+		throw Error(label + ": its partitions list " + std::to_string(triParts.size()) + " triangles, the shape has " +
+					std::to_string(triangles));
+	for (size_t t = 0; t < triParts.size(); t++)
+		if (triParts[t] >= 0 && static_cast<uint32_t>(triParts[t]) < partitions.size()) slots[t] = partitions[triParts[t]].partID;
+	return slots;
+}
+
+std::vector<ShapeSlots> ReadShapeSlots(const std::string& path) {
+	NifFile nif;
+	LoadNifOrThrow(nif, path);
+	const std::string file = std::filesystem::u8path(path).filename().u8string();
+	std::vector<ShapeSlots> out;
+	for (NiShape* shape : nif.GetShapes()) {
+		std::vector<Triangle> tris;
+		shape->GetTriangles(tris);
+		if (tris.empty()) continue;
+		const std::string name = shape->name.get();
+		out.push_back({name, TriangleSlots(nif, shape, tris.size(), file + " / " + name)});
+	}
+	return out;
+}
+
 std::vector<PosedShape> LoadPosedShapes(const std::string& path, const Skeleton& skel, const LogFn& log) {
 	NifFile nif;
 	LoadNifOrThrow(nif, path);
@@ -172,6 +201,7 @@ std::vector<PosedShape> LoadPosedShapes(const std::string& path, const Skeleton&
 			if (t.p1 >= nv || t.p2 >= nv || t.p3 >= nv) throw Error(label + ": triangle index out of range");
 			s.tris.push_back({t.p1, t.p2, t.p3});
 		}
+		s.triSlots = TriangleSlots(nif, shape, s.tris.size(), label);
 		if (auto* uv = nif.GetUvsForShape(shape); uv && uv->size() == nv) {
 			for (auto& u : *uv) s.uvs.push_back({u.u, u.v});
 		}

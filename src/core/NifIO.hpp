@@ -11,6 +11,14 @@ Skeleton LoadSkeleton(const std::string& path);
 // rotation in FaceGen files) and per-shape global-to-skin transforms are never used for skinned shapes.
 std::vector<PosedShape> LoadPosedShapes(const std::string& path, const Skeleton& skel, const LogFn& log);
 
+// The body slot (dismember partition ID) of every triangle of every shape with geometry, without
+// loading the rest. Shapes in file order, as LoadPosedShapes returns them.
+struct ShapeSlots {
+	std::string shape;
+	std::vector<uint16_t> triSlots; // 0 when the shape has no partitions
+};
+std::vector<ShapeSlots> ReadShapeSlots(const std::string& path);
+
 // Bone-name lookup with the known FaceGen alias ("Head" -> "NPC Head [Head]"). -1 if absent.
 int ResolveBone(const Skeleton& skel, const std::string& name);
 

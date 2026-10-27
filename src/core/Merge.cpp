@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <map>
 #include <set>
 #include <unordered_set>
 
@@ -56,6 +57,7 @@ std::vector<PosedShape> BlendWeights(std::vector<PosedShape> s0, std::vector<Pos
 			throw Error(sl + ": vertex counts differ between weight files (" + std::to_string(a.positions.size()) +
 						" vs " + std::to_string(b.positions.size()) + ")");
 		if (a.tris != b.tris) throw Error(sl + ": triangle lists differ between weight files");
+		if (a.triSlots != b.triSlots) throw Error(sl + ": body slots (partitions) differ between weight files");
 
 		PosedShape r = t >= 0.5 ? b : a;
 		const bool blendNormals = !a.normals.empty() && !b.normals.empty();
@@ -88,7 +90,9 @@ std::vector<PosedShape> BlendWeights(std::vector<PosedShape> s0, std::vector<Pos
 // position (not per vertex), so copies of a vertex split at a UV seam, or shared across a part
 // seam (neck, wrists, ankles), all get the same normal and no shading seam appears. Only faces
 // whose vertices all need normals contribute, so authored normals (hair, eyes) are left alone.
-void ComputeMissingNormals(MergedModel& m, const std::vector<bool>& needs) {
+// Only faces marked in `faces` contribute, and only vertices marked in `assign` are given a normal.
+void ComputeMissingNormals(MergedModel& m, const std::vector<bool>& needs, const std::vector<bool>& faces,
+						   const std::vector<bool>& assign) {
 	if (std::none_of(needs.begin(), needs.end(), [](bool b) { return b; })) return;
 	struct Key {
 		int64_t x, y, z;
@@ -104,17 +108,167 @@ void ComputeMissingNormals(MergedModel& m, const std::vector<bool>& needs) {
 		return Key{std::llround(p.x / kWeld), std::llround(p.y / kWeld), std::llround(p.z / kWeld)};
 	};
 	std::unordered_map<Key, Vec3, KeyHash> acc;
-	for (auto& t : m.tris) {
-		if (!needs[t[0]] || !needs[t[1]] || !needs[t[2]]) continue;
+	for (size_t f = 0; f < m.tris.size(); f++) {
+		const auto& t = m.tris[f];
+		if (!faces[f] || !needs[t[0]] || !needs[t[1]] || !needs[t[2]]) continue;
 		Vec3 n = (m.positions[t[1]] - m.positions[t[0]]).cross(m.positions[t[2]] - m.positions[t[0]]);
 		for (int k = 0; k < 3; k++) acc[key(m.positions[t[k]])] += n;
 	}
 	for (size_t v = 0; v < m.positions.size(); v++)
-		if (needs[v]) {
+		if (needs[v] && assign[v]) {
 			auto it = acc.find(key(m.positions[v]));
 			Vec3 n = it == acc.end() ? Vec3() : it->second.normalized();
 			m.normals[v] = n.length() > 0 ? n : Vec3(0, 0, 1);
 		}
+}
+
+// Biped slots (30-61) are what armour takes; IDs of 100 and more mark head-part partitions.
+constexpr uint16_t kFirstBipedSlot = 30, kLastBipedSlot = 61, kFirstHeadPartId = 100, kHairSlot = 31;
+bool IsBipedSlot(uint16_t s) { return s >= kFirstBipedSlot && s <= kLastBipedSlot; }
+
+std::string PartLabel(const PartInput& p) { return FileName(p.path0) + (p.path1 ? " + " + FileName(*p.path1) : ""); }
+
+std::string SlotList(const std::set<uint16_t>& slots) {
+	std::string r;
+	for (uint16_t s : slots) r += (r.empty() ? "" : ", ") + std::to_string(s);
+	return r;
+}
+
+// Drops the triangles marked in `drop`, then every vertex no remaining triangle uses, then every
+// material slot left without triangles. Slots keep their order and stay contiguous; per-slot vertex
+// ranges are recounted.
+void RemoveTriangles(MergedModel& m, const std::vector<bool>& drop) {
+	std::vector<bool> used(m.positions.size(), false), slotUsed(m.materials.size(), false);
+	for (size_t t = 0; t < m.tris.size(); t++)
+		if (!drop[t]) {
+			for (uint32_t v : m.tris[t]) used[v] = true;
+			slotUsed[m.triMaterial[t]] = true;
+		}
+	std::vector<uint32_t> remap(m.positions.size(), UINT32_MAX);
+	std::vector<int> slotRemap(m.materials.size(), -1);
+	MergedModel out;
+	for (size_t slot = 0; slot < m.materialVertices.size(); slot++) {
+		if (!slotUsed[slot]) continue;
+		slotRemap[slot] = static_cast<int>(out.materials.size());
+		out.materials.push_back(m.materials[slot]);
+		auto [first, count] = m.materialVertices[slot];
+		const uint32_t base = static_cast<uint32_t>(out.positions.size());
+		for (uint32_t v = first; v < first + count; v++) {
+			if (!used[v]) continue;
+			remap[v] = static_cast<uint32_t>(out.positions.size());
+			out.positions.push_back(m.positions[v]);
+			out.normals.push_back(m.normals[v]);
+			out.uvs.push_back(m.uvs[v]);
+			if (!m.colors.empty()) out.colors.push_back(m.colors[v]);
+			out.weights.push_back(m.weights[v]);
+		}
+		out.materialVertices.push_back({base, static_cast<uint32_t>(out.positions.size()) - base});
+	}
+	for (size_t t = 0; t < m.tris.size(); t++)
+		if (!drop[t]) {
+			out.tris.push_back({remap[m.tris[t][0]], remap[m.tris[t][1]], remap[m.tris[t][2]]});
+			out.triMaterial.push_back(slotRemap[m.triMaterial[t]]);
+		}
+	m.materials = std::move(out.materials);
+	m.positions = std::move(out.positions);
+	m.normals = std::move(out.normals);
+	m.uvs = std::move(out.uvs);
+	m.colors = std::move(out.colors);
+	m.weights = std::move(out.weights);
+	m.tris = std::move(out.tris);
+	m.triMaterial = std::move(out.triMaterial);
+	m.materialVertices = std::move(out.materialVertices);
+}
+
+// A part's body slots: all the outfit rule needs.
+struct PartSlots {
+	PartInput input;
+	bool outfit = false;
+	std::vector<ShapeSlots> shapes;
+};
+
+struct OutfitPlan {
+	std::vector<std::vector<std::vector<bool>>> hidden; // per part, shape, triangle: hidden by the outfit
+	std::vector<PartReport> reports;                    // per part
+	std::vector<std::string> lines;                     // per part: what an outfit item does; empty for the character
+	std::vector<std::string> warnings;
+};
+
+// The outfit rule. Each item takes the biped slots (30-61) of its partitions; two items cannot take one
+// slot. Character triangles in a taken slot are hidden, per partition. In a head (a part with head-part
+// partitions) only the hair reacts: its eyes, mouth and brows carry slot 32 but are head parts, not
+// armour, and a dress never removes them.
+OutfitPlan PlanOutfit(const std::vector<PartSlots>& parts) {
+	OutfitPlan plan;
+	std::vector<std::set<uint16_t>> slots(parts.size());
+	std::vector<bool> head(parts.size(), false);
+	for (size_t i = 0; i < parts.size(); i++)
+		for (auto& sh : parts[i].shapes)
+			for (uint16_t slot : sh.triSlots) {
+				if (slot) slots[i].insert(slot);
+				if (slot >= kFirstHeadPartId) head[i] = true;
+			}
+
+	std::map<uint16_t, size_t> takenBy;
+	std::vector<std::set<uint16_t>> biped(parts.size());
+	for (size_t i = 0; i < parts.size(); i++) {
+		if (!parts[i].outfit) continue;
+		for (uint16_t slot : slots[i])
+			if (IsBipedSlot(slot)) biped[i].insert(slot);
+		for (uint16_t slot : biped[i]) {
+			auto [it, fresh] = takenBy.emplace(slot, i);
+			if (!fresh)
+				throw Error("Outfit: " + PartLabel(parts[it->second].input) + " and " + PartLabel(parts[i].input) +
+							" both take body slot " + std::to_string(slot) + "; only one item can be worn per slot");
+		}
+		if (biped[i].empty())
+			plan.warnings.push_back("Outfit: " + PartLabel(parts[i].input) +
+									" takes no body slot (30-61) in its partitions; it is added over the character");
+	}
+
+	std::map<size_t, std::vector<std::string>> replaces; // outfit part -> what it hides
+	plan.hidden.resize(parts.size());
+	for (size_t i = 0; i < parts.size(); i++) {
+		const PartSlots& part = parts[i];
+		PartReport report;
+		report.file = part.input.path0;
+		report.role = part.outfit ? "outfit" : "character";
+		report.slots.assign(slots[i].begin(), slots[i].end());
+		report.head = head[i];
+		plan.hidden[i].resize(part.shapes.size());
+		for (size_t k = 0; k < part.shapes.size(); k++) {
+			const ShapeSlots& sh = part.shapes[k];
+			auto& hide = plan.hidden[i][k];
+			hide.assign(sh.triSlots.size(), false);
+			if (part.outfit) continue;
+			std::map<uint16_t, size_t> count;
+			for (size_t t = 0; t < sh.triSlots.size(); t++) {
+				const uint16_t slot = sh.triSlots[t];
+				if (!takenBy.count(slot) || (head[i] && slot != kHairSlot)) continue;
+				hide[t] = true;
+				count[slot]++;
+			}
+			size_t total = 0;
+			for (auto& [slot, n] : count) total += n;
+			const bool whole = total == sh.triSlots.size();
+			for (auto& [slot, n] : count) {
+				const size_t by = takenBy[slot];
+				report.removed.push_back({sh.shape, slot, n, whole, parts[by].input.path0});
+				replaces[by].push_back(FileName(part.input.path0) + " / " + sh.shape +
+									   (whole ? "" : " (" + std::to_string(n) + " triangles in slot " + std::to_string(slot) + ")"));
+			}
+		}
+		plan.reports.push_back(std::move(report));
+	}
+	plan.lines.resize(parts.size());
+	for (size_t i = 0; i < parts.size(); i++) {
+		if (!parts[i].outfit) continue;
+		std::string what;
+		for (auto& r : replaces[i]) what += (what.empty() ? "" : ", ") + r;
+		plan.lines[i] = "Outfit: " + PartLabel(parts[i].input) + (biped[i].empty() ? "" : " takes slot " + SlotList(biped[i])) +
+						": " + (what.empty() ? "added over the character" : "replaces " + what);
+	}
+	return plan;
 }
 
 } // namespace
@@ -148,6 +302,15 @@ std::vector<PartInput> PairPartFiles(const std::vector<std::string>& paths) {
 	return parts;
 }
 
+std::vector<std::string> DescribeOutfit(const std::vector<PartInput>& character, const std::vector<PartInput>& outfit) {
+	std::vector<PartSlots> parts;
+	for (auto& p : character) parts.push_back({p, false, ReadShapeSlots(p.path0)});
+	for (auto& p : outfit) parts.push_back({p, true, ReadShapeSlots(p.path0)});
+	OutfitPlan plan = PlanOutfit(parts);
+	std::vector<std::string> lines(plan.lines.begin() + character.size(), plan.lines.end());
+	return lines;
+}
+
 MergedModel MergeModel(const MergeRequest& req, const LogFn& log) {
 	if (req.skeletonPath.empty()) throw Error("No skeleton selected");
 	if (req.parts.empty()) throw Error("No model parts selected");
@@ -162,23 +325,60 @@ MergedModel MergeModel(const MergeRequest& req, const LogFn& log) {
 		if (!missing.empty()) throw Error("Skeleton lacks bones required for a Unity Humanoid:" + missing);
 	}
 
-	std::vector<PosedShape> shapes;
-	for (const PartInput& part : req.parts) {
-		std::vector<PosedShape> ps;
+	struct Loaded {
+		PartInput input;
+		bool outfit = false;
+		std::vector<PosedShape> shapes;
+	};
+	std::vector<Loaded> loaded;
+	auto load = [&](const PartInput& part, bool outfit) {
+		Loaded l{part, outfit};
+		const std::string what = outfit ? "Wearing " : "Loading ";
 		if (part.path1) {
-			log(LogLevel::Info, "Loading " + FileName(part.path0) + " + " + FileName(*part.path1) + " at weight " +
-									std::to_string(static_cast<int>(req.weight)));
-			ps = BlendWeights(LoadPosedShapes(part.path0, skel, log), LoadPosedShapes(*part.path1, skel, log),
-							  req.weight, part, log);
+			log(LogLevel::Info, what + PartLabel(part) + " at weight " + std::to_string(static_cast<int>(req.weight)));
+			l.shapes = BlendWeights(LoadPosedShapes(part.path0, skel, log), LoadPosedShapes(*part.path1, skel, log),
+									req.weight, part, log);
 		}
 		else {
-			log(LogLevel::Info, "Loading " + FileName(part.path0));
-			ps = LoadPosedShapes(part.path0, skel, log);
+			log(LogLevel::Info, what + PartLabel(part));
+			l.shapes = LoadPosedShapes(part.path0, skel, log);
 		}
-		for (auto& s : ps) shapes.push_back(std::move(s));
-	}
+		for (auto& s : l.shapes) s.material.role = outfit ? "outfit" : "character";
+		loaded.push_back(std::move(l));
+	};
+	for (const PartInput& part : req.parts) load(part, false);
+	for (const PartInput& part : req.outfit) load(part, true);
 
+	std::vector<PartSlots> slotsIn;
+	for (auto& l : loaded) {
+		PartSlots ps{l.input, l.outfit};
+		for (auto& sh : l.shapes) ps.shapes.push_back({sh.material.shapeName, sh.triSlots});
+		slotsIn.push_back(std::move(ps));
+	}
+	OutfitPlan plan = PlanOutfit(slotsIn);
+	for (auto& w : plan.warnings) log(LogLevel::Warning, w);
+	for (auto& line : plan.lines)
+		if (!line.empty()) log(LogLevel::Info, line);
+	const auto& hidden = plan.hidden;
 	MergedModel m;
+	m.parts = std::move(plan.reports);
+
+	// Every shape goes into the merge; hidden triangles stay until the normals are computed and are
+	// removed afterwards (with their unused vertices, and shapes left with nothing).
+	std::vector<PosedShape> shapes;
+	std::vector<bool> dropTri, wholeHidden;
+	for (size_t i = 0; i < loaded.size(); i++)
+		for (size_t k = 0; k < loaded[i].shapes.size(); k++) {
+			const auto& h = hidden[i][k];
+			PosedShape& s = loaded[i].shapes[k];
+			std::set<uint16_t> kept;
+			for (size_t t = 0; t < s.tris.size(); t++)
+				if (!h[t] && s.triSlots[t]) kept.insert(s.triSlots[t]);
+			s.material.slots.assign(kept.begin(), kept.end());
+			dropTri.insert(dropTri.end(), h.begin(), h.end());
+			wholeHidden.push_back(std::all_of(h.begin(), h.end(), [](bool b) { return b; }));
+			shapes.push_back(std::move(s));
+		}
 
 	// Output bones: every weighted bone, every Humanoid bone, and all their ancestors below the
 	// skeleton file's own root node (which is just the file's container).
@@ -186,15 +386,24 @@ MergedModel MergeModel(const MergeRequest& req, const LogFn& log) {
 	auto keepChain = [&](int i) {
 		for (; i > 0 && !keep[i]; i = skel.bones[i].parent) keep[i] = true;
 	};
-	for (auto& s : shapes)
-		for (auto& vw : s.weights)
-			for (auto& p : vw) {
+	size_t triBase = 0;
+	for (auto& s : shapes) {
+		std::vector<bool> used(s.positions.size(), false);
+		for (size_t t = 0; t < s.tris.size(); t++)
+			if (!dropTri[triBase + t])
+				for (uint32_t v : s.tris[t]) used[v] = true;
+		triBase += s.tris.size();
+		for (size_t v = 0; v < s.weights.size(); v++) {
+			if (!used[v]) continue;
+			for (auto& p : s.weights[v]) {
 				if (p.first == 0)
 					throw Error(FileName(s.material.sourceFile) + " / " + s.material.shapeName +
 								": weighted to the skeleton file's root node '" + skel.bones[0].name +
 								"', which is not a bone");
 				keepChain(p.first);
 			}
+		}
+	}
 	for (auto& h : HumanoidMap())
 		if (int i = skel.find(h.skyrim); i >= 0) keepChain(i);
 
@@ -213,16 +422,20 @@ MergedModel MergeModel(const MergeRequest& req, const LogFn& log) {
 	}
 
 	bool anyColors = std::any_of(shapes.begin(), shapes.end(), [](auto& s) { return !s.colors.empty(); });
-	std::vector<bool> needsNormal;
+	std::vector<bool> needsNormal, replacedSlot;
 	std::unordered_set<std::string> usedNames;
-	for (auto& s : shapes) {
+	for (size_t si = 0; si < shapes.size(); si++) {
+		const PosedShape& s = shapes[si];
 		MaterialSlot mat = s.material;
 		std::string name = mat.name.empty() ? "Material" : mat.name;
-		for (int n = 2; usedNames.count(name); n++) name = mat.name + "_" + std::to_string(n);
-		usedNames.insert(name);
+		if (!wholeHidden[si]) { // a shape the outfit hides entirely leaves the model; it takes no name
+			for (int n = 2; usedNames.count(name); n++) name = mat.name + "_" + std::to_string(n);
+			usedNames.insert(name);
+		}
 		mat.name = name;
 		const int slot = static_cast<int>(m.materials.size());
 		m.materials.push_back(mat);
+		replacedSlot.push_back(wholeHidden[si]);
 
 		const uint32_t base = static_cast<uint32_t>(m.positions.size());
 		m.materialVertices.push_back({base, static_cast<uint32_t>(s.positions.size())});
@@ -242,7 +455,14 @@ MergedModel MergeModel(const MergeRequest& req, const LogFn& log) {
 		}
 	}
 
-	ComputeMissingNormals(m, needsNormal);
+	// Normals come from the surface as worn. A shape the outfit replaces entirely does not count: the
+	// item's own surface (the dress's body copy) takes its place at the wrists, neck and ankles. A shape
+	// only partly hidden counts in full: hiding a partition cuts no seam into the surface, so what stays
+	// visible shades as it does without the outfit.
+	std::vector<bool> faces(m.tris.size()), all(m.positions.size(), true);
+	for (size_t t = 0; t < m.tris.size(); t++) faces[t] = !replacedSlot[m.triMaterial[t]];
+	ComputeMissingNormals(m, needsNormal, faces, all);
+	if (std::any_of(dropTri.begin(), dropTri.end(), [](bool b) { return b; })) RemoveTriangles(m, dropTri);
 	if (!req.morphPaths.empty()) ApplyMorphs(m, req.morphPaths, log);
 
 	log(LogLevel::Info, "Merged " + std::to_string(m.materials.size()) + " shapes: " + std::to_string(m.positions.size()) +

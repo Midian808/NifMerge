@@ -301,16 +301,14 @@ TEST(MergeSamples) {
 	for (auto& mat : m.materials) CHECK(++names[mat.name] == 1, "duplicate material name %s", mat.name.c_str());
 }
 
-TEST(ComputedNormalsAreSeamless) {
-	MergeRequest req{Sample("skeleton_female.nif"), PairPartFiles(SampleParts()), 50};
-	MergedModel m = MergeModel(req, Quiet);
+// Computed normals are unit length, and vertices that share a position across a seam inside the skin
+// (UV seams, neck, wrists, ankles) share a normal, or Unity shows a shading line. Skin =
+// model-space-normal-mapped slots, whose nifs store no vertex normals.
+void CheckSeamNormals(const MergedModel& m, const char* tag) {
 	size_t bad = 0;
 	for (auto& n : m.normals)
 		if (std::fabs(n.length() - 1) > 1e-6) bad++;
-	CHECK(bad == 0, "%zu normals are not unit length", bad);
-	// Vertices that share a position across a seam inside the skin (UV seams, neck, wrists, ankles)
-	// must share a normal, or Unity shows a shading line. Skin = model-space-normal-mapped slots, whose
-	// nifs store no vertex normals.
+	CHECK(bad == 0, "%s: %zu normals are not unit length", tag, bad);
 	std::map<std::tuple<long long, long long, long long>, std::vector<size_t>> byPos;
 	std::vector<int> vertSlot(m.positions.size());
 	for (size_t t = 0; t < m.tris.size(); t++)
@@ -329,9 +327,13 @@ TEST(ComputedNormalsAreSeamless) {
 			if ((m.normals[verts[i]] - m.normals[verts[0]]).length() > 1e-6) mismatched++;
 		}
 	}
-	CHECK(seamVerts > 100, "expected UV/part seams, found %zu", seamVerts);
-	CHECK(crossPart > 20, "expected vertices shared across parts (neck/wrist/ankle), found %zu", crossPart);
-	CHECK(mismatched == 0, "%zu seam vertices have differing normals", mismatched);
+	CHECK(seamVerts > 100, "%s: expected UV/part seams, found %zu", tag, seamVerts);
+	CHECK(crossPart > 20, "%s: expected vertices shared across parts (neck/wrist/ankle), found %zu", tag, crossPart);
+	CHECK(mismatched == 0, "%s: %zu seam vertices have differing normals", tag, mismatched);
+}
+
+TEST(ComputedNormalsAreSeamless) {
+	CheckSeamNormals(MergeModel({Sample("skeleton_female.nif"), PairPartFiles(SampleParts()), 50}, Quiet), "plain");
 }
 
 TEST(ModelSpaceNormalMatrix) {
@@ -924,6 +926,305 @@ TEST(BlendShapesRoundTripFbx) {
 
 	MergedModel plain = MergeModel({Sample("skeleton_female.nif"), PairPartFiles(SampleParts()), 50}, Quiet);
 	CHECK(plain.blendShapes.empty() && plain.morphSources.empty(), "no morphs without .tri input");
+}
+
+// ---- Outfit (samples/clothing): items replace the character's triangles in the body slots they take.
+
+std::string Dress() { return Sample("clothing/Dress/01_LatexDress_0.nif"); }
+std::string Boots() { return Sample("clothing/Boots/02_HighBoots_0.nif"); }
+std::string Thong() { return Sample("clothing/Thong/03_String_0.nif"); }
+
+MergedModel Wear(const std::vector<std::string>& items, const LogFn& log = Quiet,
+				 const std::vector<std::string>& character = SampleParts()) {
+	MergeRequest req{Sample("skeleton_female.nif"), PairPartFiles(character), 50};
+	req.outfit = PairPartFiles(items);
+	return MergeModel(req, log);
+}
+
+const MergedModel& PlainModel() {
+	static MergedModel m = MergeModel({Sample("skeleton_female.nif"), PairPartFiles(SampleParts()), 50}, Quiet);
+	return m;
+}
+
+int SlotOf(const MergedModel& m, const std::string& fileStart, const std::string& shape) {
+	for (size_t i = 0; i < m.materials.size(); i++)
+		if (Lower(fs::u8path(m.materials[i].sourceFile).filename().u8string()).rfind(Lower(fileStart), 0) == 0 &&
+			m.materials[i].shapeName == shape)
+			return int(i);
+	return -1;
+}
+
+const PartReport* ReportOf(const MergedModel& m, const std::string& fileStart) {
+	for (auto& p : m.parts)
+		if (Lower(fs::u8path(p.file).filename().u8string()).rfind(Lower(fileStart), 0) == 0) return &p;
+	return nullptr;
+}
+
+size_t SlotTriangles(const MergedModel& m, int slot) {
+	return size_t(std::count(m.triMaterial.begin(), m.triMaterial.end(), slot));
+}
+
+// Every vertex of a character slot that is still present equals the same vertex merged without the
+// outfit (position, normal, UV): the outfit only takes triangles away. `keptOf` lists, per vertex of
+// the plain slot, whether it survives (in order); empty means all of them. Where the slot meets a
+// shape the outfit replaced (`replaced`, a file name start) or the outfit's own surface, its vertices
+// join the item's surface instead, so their normals follow it: there only positions and UVs are compared.
+void ExpectCharacterUnchanged(const MergedModel& m, const std::string& fileStart, const std::string& shape,
+							  const std::vector<bool>& keptOf = {}, const std::string& replaced = "") {
+	const MergedModel& plain = PlainModel();
+	const int a = SlotOf(plain, fileStart, shape), b = SlotOf(m, fileStart, shape);
+	CHECK(a >= 0 && b >= 0, "%s / %s present", fileStart.c_str(), shape.c_str());
+	if (a < 0 || b < 0) return;
+	auto [fa, ca] = plain.materialVertices[a];
+	auto [fb, cb] = m.materialVertices[b];
+	auto key = [](const Vec3& q) { return std::make_tuple(std::llround(q.x * 1000), std::llround(q.y * 1000), std::llround(q.z * 1000)); };
+	std::set<std::tuple<long long, long long, long long>> seam; // positions shared with a replaced shape or the outfit
+	if (!replaced.empty()) {
+		for (size_t r = 0; r < plain.materials.size(); r++)
+			if (Lower(fs::u8path(plain.materials[r].sourceFile).filename().u8string()).rfind(Lower(replaced), 0) == 0)
+				for (uint32_t v = 0; v < plain.materialVertices[r].second; v++)
+					seam.insert(key(plain.positions[plain.materialVertices[r].first + v]));
+		for (size_t r = 0; r < m.materials.size(); r++)
+			if (m.materials[r].role == "outfit")
+				for (uint32_t v = 0; v < m.materialVertices[r].second; v++) seam.insert(key(m.positions[m.materialVertices[r].first + v]));
+	}
+	double pos = 0, nrm = 0, uv = 0;
+	uint32_t j = 0;
+	size_t atSeam = 0;
+	for (uint32_t i = 0; i < ca; i++) {
+		if (!keptOf.empty() && !keptOf[i]) continue;
+		if (j >= cb) break;
+		pos = std::fmax(pos, (plain.positions[fa + i] - m.positions[fb + j]).length());
+		if (seam.count(key(plain.positions[fa + i]))) atSeam++;
+		else nrm = std::fmax(nrm, (plain.normals[fa + i] - m.normals[fb + j]).length());
+		uv = std::fmax(uv, std::fabs(plain.uvs[fa + i][0] - m.uvs[fb + j][0]) + std::fabs(plain.uvs[fa + i][1] - m.uvs[fb + j][1]));
+		j++;
+	}
+	const size_t want = keptOf.empty() ? ca : size_t(std::count(keptOf.begin(), keptOf.end(), true));
+	CHECK(cb == want && j == want, "%s / %s keeps %u vertices, expected %zu", fileStart.c_str(), shape.c_str(), cb, want);
+	CHECK(pos < 1e-9 && nrm < 1e-9 && uv < 1e-9, "%s / %s unchanged by the outfit (position %g, normal %g, uv %g)",
+		  fileStart.c_str(), shape.c_str(), pos, nrm, uv);
+	CHECK(replaced.empty() || (atSeam > 0 && atSeam * 20 < want), "%s / %s: %zu vertices on the seam with %s", fileStart.c_str(),
+		  shape.c_str(), atSeam, replaced.c_str());
+}
+
+// Writes copies of a weight pair into .tmp/tests/<folder>, giving each triangle of each shape the slot
+// `slotOf(shape, triangle, its three vertices in the _0 file)` returns. The _1 file gets the same
+// assignment, as Outfit Studio writes it. Returns the copy's _0 path.
+std::string Repartition(const std::string& src0, const std::string& folder,
+						const std::function<uint16_t(const std::string&, const std::array<nifly::Vector3, 3>&)>& slotOf) {
+	const fs::path dir = fs::u8path(Tmp(folder));
+	fs::create_directories(dir);
+	std::map<std::string, std::pair<std::vector<uint16_t>, std::vector<int>>> plan; // shape -> slots, triParts
+	std::string out0;
+	for (int k = 0; k < 2; k++) {
+		std::string src = src0;
+		src.replace(src.size() - 6, 2, k ? "_1" : "_0");
+		nifly::NifFile nif;
+		CHECK(nif.Load(fs::u8path(src)) == 0, "load %s", src.c_str());
+		for (auto* shape : nif.GetShapes()) {
+			const std::string name = shape->name.get();
+			std::vector<nifly::Triangle> tris;
+			shape->GetTriangles(tris);
+			if (k == 0) {
+				const auto* verts = nif.GetVertsForShape(shape);
+				std::vector<uint16_t> ids;
+				std::vector<int> triParts;
+				for (auto& t : tris) {
+					uint16_t slot = slotOf(name, {nifly::Vector3((*verts)[t.p1]), nifly::Vector3((*verts)[t.p2]), nifly::Vector3((*verts)[t.p3])});
+					auto it = std::find(ids.begin(), ids.end(), slot);
+					if (it == ids.end()) ids.push_back(slot), it = ids.end() - 1;
+					triParts.push_back(int(it - ids.begin()));
+				}
+				plan[name] = {ids, triParts};
+			}
+			auto& [ids, triParts] = plan[name];
+			nifly::NiVector<nifly::BSDismemberSkinInstance::PartitionInfo> info;
+			for (uint16_t id : ids) {
+				nifly::BSDismemberSkinInstance::PartitionInfo pi;
+				pi.flags = nifly::PartitionFlags(nifly::PF_EDITOR_VISIBLE | nifly::PF_START_NET_BONESET);
+				pi.partID = id;
+				info.push_back(pi);
+			}
+			nif.SetShapePartitions(shape, info, triParts);
+			nif.UpdateSkinPartitions(shape);
+		}
+		const fs::path dst = dir / fs::u8path(src).filename();
+		CHECK(nif.Save(dst) == 0, "save %s", dst.u8string().c_str());
+		if (k == 0) out0 = dst.u8string();
+	}
+	return out0;
+}
+
+TEST(OutfitDressReplacesTheBody) {
+	MergedModel m = Wear({Dress()});
+	for (const char* shape : {"3BA", "3BA_Vagina", "3BA_Anus"}) {
+		CHECK(SlotOf(m, "femalebody", shape) < 0, "the character's %s is replaced", shape);
+		const int copy = SlotOf(m, "01_LatexDress", shape);
+		CHECK(copy >= 0 && m.materials[copy].role == "outfit", "the dress's own %s is worn", shape);
+	}
+	CHECK(SlotOf(m, "01_LatexDress", "Dress") >= 0, "the dress itself is present");
+	const PartReport* body = ReportOf(m, "femalebody");
+	CHECK(body && body->removed.size() == 3, "the body reports its three shapes removed");
+	if (body)
+		for (auto& r : body->removed)
+			CHECK(r.slot == 32 && r.wholeShape && Lower(fs::u8path(r.by).filename().u8string()).rfind("01_latexdress", 0) == 0,
+				  "%s removed whole by the dress in slot 32", r.shape.c_str());
+	// Hands, feet and the whole head stay; the FaceGen eyes, mouth and brows carry slot 32 but are head parts.
+	ExpectCharacterUnchanged(m, "femalehands", "artHands", {}, "femalebody");
+	ExpectCharacterUnchanged(m, "femalefeet", "Feet", {}, "femalebody");
+	for (size_t i = 0; i < PlainModel().materials.size(); i++) {
+		const MaterialSlot& s = PlainModel().materials[i];
+		if (Lower(fs::u8path(s.sourceFile).filename().u8string()) == "head.nif") ExpectCharacterUnchanged(m, "head.nif", s.shapeName);
+	}
+	// The dress's body copy is the dress file's own geometry, re-posed like any part.
+	MergedModel alone = MergeModel({Sample("skeleton_female.nif"), PairPartFiles({Dress()}), 50}, Quiet);
+	const int a = SlotOf(alone, "01_LatexDress", "3BA"), b = SlotOf(m, "01_LatexDress", "3BA");
+	if (a >= 0 && b >= 0) {
+		double worst = 0;
+		for (uint32_t i = 0; i < alone.materialVertices[a].second; i++)
+			worst = std::fmax(worst, (alone.positions[alone.materialVertices[a].first + i] - m.positions[m.materialVertices[b].first + i]).length());
+		CHECK(alone.materialVertices[a].second == m.materialVertices[b].second && worst < 1e-9,
+			  "the body copy equals the dress file re-posed (error %g)", worst);
+	}
+}
+
+TEST(OutfitBootsReplaceTheFeet) {
+	MergedModel m = Wear({Boots()});
+	CHECK(SlotOf(m, "femalefeet", "Feet") < 0, "the feet are replaced");
+	CHECK(SlotOf(m, "02_HighBoots", "Boots") >= 0, "the boots are worn");
+	ExpectCharacterUnchanged(m, "femalebody", "3BA", {}, "femalefeet"); // the legs stay inside the boots
+	ExpectCharacterUnchanged(m, "femalehands", "artHands");
+	const PartReport* feet = ReportOf(m, "femalefeet");
+	CHECK(feet && feet->removed.size() == 1 && feet->removed[0].slot == 37 && feet->removed[0].wholeShape,
+		  "the feet report removal in slot 37");
+}
+
+TEST(OutfitThongIsAdded) {
+	MergedModel m = Wear({Thong()});
+	const int thong = SlotOf(m, "03_String", "0_Panty001");
+	CHECK(thong >= 0 && m.materials[thong].role == "outfit" && m.materials[thong].slots == std::vector<uint16_t>{52},
+		  "the thong is worn in slot 52");
+	CHECK(m.materials.size() == PlainModel().materials.size() + 1, "nothing is removed");
+	for (auto& p : m.parts) CHECK(p.removed.empty(), "%s loses nothing", p.file.c_str());
+	ExpectCharacterUnchanged(m, "femalebody", "3BA");
+}
+
+TEST(OutfitAllThree) {
+	std::vector<std::string> logLines;
+	MergedModel m = Wear({Dress(), Boots(), Thong()}, [&](LogLevel, const std::string& s) {
+		if (s.rfind("Outfit: ", 0) == 0) logLines.push_back(s);
+	});
+	CHECK(m.materials.size() == 14, "14 material slots, got %zu", m.materials.size());
+	CHECK(SlotOf(m, "femalebody", "3BA") < 0 && SlotOf(m, "femalefeet", "Feet") < 0, "body and feet replaced");
+	ExpectCharacterUnchanged(m, "femalehands", "artHands", {}, "femalebody");
+	CheckSeamNormals(m, "dress, boots and thong");
+	// The GUI's preview, read from the files alone, says exactly what the merge logs.
+	auto preview = DescribeOutfit(PairPartFiles(SampleParts()), PairPartFiles({Dress(), Boots(), Thong()}));
+	CHECK(preview == logLines, "GUI preview matches the merge log (%zu vs %zu lines)", preview.size(), logLines.size());
+	for (auto& l : logLines) std::printf("    [outfit] %s\n", l.c_str());
+	// The sidecar carries the decisions.
+	RunOptions opt;
+	opt.request = {Sample("skeleton_female.nif"), PairPartFiles(SampleParts()), 50};
+	opt.request.outfit = PairPartFiles({Dress(), Boots(), Thong()});
+	opt.fbxPath = Tmp("outfit.fbx");
+	RunPipeline(opt, Quiet);
+	std::ifstream f(fs::u8path(Tmp("outfit.materials.json")));
+	std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+	CHECK(json.find("{\"shape\": \"Feet\", \"slot\": 37, \"triangles\": 16288, \"wholeShape\": true, \"by\": \"02_HighBoots_0.nif\"}") !=
+			  std::string::npos,
+		  "sidecar records the feet replaced by the boots");
+	CHECK(json.find("\"role\": \"outfit\"") != std::string::npos && json.find("\"slots\": [52]") != std::string::npos,
+		  "sidecar materials carry role and slots");
+}
+
+TEST(OutfitTwoItemsInOneSlotIsAnError) {
+	std::string msg;
+	try {
+		Wear({Dress(), Sample("femalebody_0.nif")});
+	}
+	catch (const Error& e) {
+		msg = e.what();
+	}
+	CHECK(msg.find("01_LatexDress_0.nif") != std::string::npos && msg.find("femalebody_0.nif") != std::string::npos &&
+			  msg.find("slot 32") != std::string::npos,
+		  "error names both items and the slot: '%s'", msg.c_str());
+}
+
+// No helmet sample: the thong, re-partitioned to slot 31 (hair), stands in for one.
+TEST(OutfitHelmetHidesOnlyTheHair) {
+	const std::string helmet = Repartition(Thong(), "helmet", [](const std::string&, const std::array<nifly::Vector3, 3>&) { return uint16_t(31); });
+	auto slots = ReadShapeSlots(helmet);
+	CHECK(slots.size() == 1 && std::all_of(slots[0].triSlots.begin(), slots[0].triSlots.end(), [](uint16_t s) { return s == 31; }),
+		  "stand-in written with slot 31");
+	MergedModel m = Wear({helmet});
+	size_t hairGone = 0;
+	for (size_t i = 0; i < PlainModel().materials.size(); i++) {
+		const MaterialSlot& s = PlainModel().materials[i];
+		const std::string file = Lower(fs::u8path(s.sourceFile).filename().u8string());
+		const bool hair = s.slots == std::vector<uint16_t>{31};
+		if (hair) {
+			CHECK(SlotOf(m, file, s.shapeName) < 0, "%s (slot 31) hidden under the helmet", s.shapeName.c_str());
+			hairGone++;
+		}
+		else
+			ExpectCharacterUnchanged(m, file, s.shapeName);
+	}
+	CHECK(hairGone == 2, "two hair shapes hidden, got %zu", hairGone);
+}
+
+// No sample shape spans two slots: the body's triangles below the knee become slot 38 (calves) in a copy,
+// and the boots take 37 + 38 (the foot part 37, the shaft 38). Wearing them hides exactly those body
+// triangles and the vertices only they use; the rest of the body is unchanged.
+TEST(OutfitHidesPerPartition) {
+	constexpr float kKnee = 33.0f; // nif space, Z up
+	auto below = [&](const std::array<nifly::Vector3, 3>& v) { return v[0].z < kKnee && v[1].z < kKnee && v[2].z < kKnee; };
+	const std::string body = Repartition(Sample("femalebody_0.nif"), "split_body", [&](const std::string& shape, const std::array<nifly::Vector3, 3>& v) {
+		return uint16_t(shape == "3BA" && below(v) ? 38 : 32);
+	});
+	const std::string boots = Repartition(Boots(), "split_boots", [](const std::string&, const std::array<nifly::Vector3, 3>& v) {
+		return uint16_t(v[0].z < 12 && v[1].z < 12 && v[2].z < 12 ? 37 : 38);
+	});
+	// Which body triangles are below the knee, in the order the merge sees them.
+	nifly::NifFile nif;
+	nif.Load(fs::u8path(Sample("femalebody_0.nif")));
+	std::vector<bool> calf;
+	for (auto* shape : nif.GetShapes())
+		if (shape->name.get() == "3BA") {
+			std::vector<nifly::Triangle> tris;
+			shape->GetTriangles(tris);
+			const auto* verts = nif.GetVertsForShape(shape);
+			for (auto& t : tris) calf.push_back(below({nifly::Vector3((*verts)[t.p1]), nifly::Vector3((*verts)[t.p2]), nifly::Vector3((*verts)[t.p3])}));
+		}
+	const size_t calfTris = size_t(std::count(calf.begin(), calf.end(), true));
+	CHECK(calfTris > 1000 && calfTris < calf.size() / 2, "%zu of %zu body triangles below the knee", calfTris, calf.size());
+
+	std::vector<std::string> character = SampleParts();
+	character[0] = body;
+	MergedModel m = Wear({boots}, Quiet, character);
+	const int b = SlotOf(m, "femalebody", "3BA");
+	CHECK(b >= 0, "the body stays");
+	if (b < 0) return;
+	CHECK(SlotTriangles(m, b) == calf.size() - calfTris, "body keeps %zu triangles, expected %zu", SlotTriangles(m, b),
+		  calf.size() - calfTris);
+	CHECK(m.materials[b].slots == std::vector<uint16_t>{32}, "the kept body triangles are all slot 32");
+	CHECK(SlotOf(m, "femalefeet", "Feet") < 0, "the feet (slot 37) are hidden whole");
+	const PartReport* rep = ReportOf(m, "femalebody");
+	CHECK(rep && rep->removed.size() == 1 && rep->removed[0].slot == 38 && !rep->removed[0].wholeShape &&
+			  rep->removed[0].triangles == calfTris,
+		  "the body reports %zu slot-38 triangles removed", calfTris);
+	// Kept vertices: those a kept triangle uses, in order; each equals the plain merge's vertex.
+	const MergedModel& plain = PlainModel();
+	const int p = SlotOf(plain, "femalebody", "3BA");
+	std::vector<bool> kept(plain.materialVertices[p].second, false);
+	size_t t = 0;
+	for (size_t i = 0; i < plain.tris.size(); i++)
+		if (plain.triMaterial[i] == p) {
+			if (!calf[t])
+				for (uint32_t v : plain.tris[i]) kept[v - plain.materialVertices[p].first] = true;
+			t++;
+		}
+	ExpectCharacterUnchanged(m, "femalebody", "3BA", kept);
 }
 
 TEST(MergeLegacySkyrim) {

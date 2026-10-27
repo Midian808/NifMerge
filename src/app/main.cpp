@@ -18,9 +18,10 @@ namespace {
 const char* kUsage =
 	"Usage:\n"
 	"  NifMerge                                   open the GUI\n"
-	"  NifMerge merge --skeleton <skeleton.nif> --part <part.nif> [--part ...]\n"
+	"  NifMerge merge --skeleton <skeleton.nif> --part <part.nif> [--part ...] [--wear <item.nif> ...]\n"
 	"                 [--weight <0..100>] [--tri <file.tri | folder> ...] --out <model.fbx> [--obj <debug.obj>]\n"
 	"      _0/_1 weight files are paired automatically; listing either one is enough.\n"
+	"      --wear adds an outfit item: it replaces the character's parts in the body slots it takes.\n"
 	"      --tri adds facial morphs (blend shapes): each .tri is matched to a head part by its geometry.\n"
 	"  NifMerge inspect <file.nif> [--skeleton <skeleton.nif>]\n";
 
@@ -38,11 +39,12 @@ int RunCli(const std::vector<std::string>& args) {
 
 	if (cmd == "merge") {
 		nm::RunOptions opt;
-		std::vector<std::string> parts;
+		std::vector<std::string> parts, outfit;
 		for (size_t i = 1; i < args.size(); i++) {
 			const std::string& a = args[i];
 			if (a == "--skeleton") opt.request.skeletonPath = value(i);
 			else if (a == "--part") parts.push_back(value(i));
+			else if (a == "--wear") outfit.push_back(value(i));
 			else if (a == "--weight") opt.request.weight = std::stod(value(i));
 			else if (a == "--out") opt.fbxPath = value(i);
 			else if (a == "--obj") opt.objPath = value(i);
@@ -51,6 +53,7 @@ int RunCli(const std::vector<std::string>& args) {
 		}
 		if (opt.request.weight < 0 || opt.request.weight > 100) throw nm::Error("--weight must be between 0 and 100");
 		opt.request.parts = nm::PairPartFiles(parts);
+		opt.request.outfit = nm::PairPartFiles(outfit);
 		nm::RunPipeline(opt, ConsoleLog);
 		return 0;
 	}
@@ -98,6 +101,7 @@ GuiInit ParseGuiArgs(const std::vector<std::string>& args) {
 		};
 		if (a == "--skeleton") init.skeleton = value();
 		else if (a == "--part") init.files.push_back(value());
+		else if (a == "--wear") init.outfit.push_back(value());
 		else if (a == "--tri") init.morphPaths.push_back(value());
 		else if (a == "--out") init.output = value();
 		else if (a == "--weight") init.weight = std::stof(value());

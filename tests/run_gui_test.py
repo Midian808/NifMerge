@@ -2,7 +2,8 @@
 
 Drives the real GUI: launches `NifMerge gui ... --go`, which fills the window and presses Go! on the
 first frame (the same StartRun the button calls). Then it checks that:
-  * the GUI output is identical to the CLI output (FBX via fbx_summary, sidecar byte for byte),
+  * the GUI output is identical to the CLI output (FBX via fbx_summary, sidecar byte for byte), with the
+    character wearing an outfit (dress, boots, thong) so the outfit list is part of the comparison,
   * a screenshot of the window after the run is saved (.tmp/guitest/gui_window.png),
   * --exit-when-done returns 0 on success and 1 when the run fails.
 """
@@ -21,6 +22,7 @@ SUMMARY = BUILD / "tests" / "Release" / "fbx_summary.exe"
 S = ROOT / "samples"
 OUT = ROOT / ".tmp" / "guitest"
 PARTS = ["femalebody_0.nif", "femalehands_0.nif", "femalefeet_0.nif", "Head.nif"]
+OUTFIT = ["clothing/Dress/01_LatexDress_0.nif", "clothing/Boots/02_HighBoots_0.nif", "clothing/Thong/03_String_0.nif"]
 user32 = ctypes.windll.user32
 WM_CLOSE = 0x0010
 
@@ -38,6 +40,8 @@ def args_for(out_fbx, skeleton="skeleton_female.nif"):
     a = ["--skeleton", str(S / skeleton), "--weight", "50", "--tri", str(S / "trifiles"), "--out", str(out_fbx)]
     for p in PARTS:
         a += ["--part", str(S / p)]
+    for p in OUTFIT:
+        a += ["--wear", str(S / p)]
     return a
 
 

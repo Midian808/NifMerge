@@ -3,7 +3,8 @@
 For each Unity editor given, this:
   1. creates (once) a scratch Built-in pipeline project under .tmp/unity/<version>,
   2. references the com.nifmerge.importer package from this repo,
-  3. runs NifMerge.exe on the user's sample set into Assets/NifMergeTest/Character.fbx,
+  3. runs NifMerge.exe on the user's sample set into Assets/NifMergeTest/Character.fbx, and again
+     wearing the sample outfit (dress, boots, thong) into Assets/NifMergeTest/Outfit.fbx,
   4. writes small DDS test textures at some of the paths the sidecar references,
   5. opens the project in batch mode (the automatic import path a user hits) and runs
      NifMergeHarness.Run, which checks the imported result and renders two screenshots.
@@ -60,7 +61,8 @@ def role(materials, name):
     """Finds a slot by what it is, never by the sample's own shape names. Must match the Roles class
     in tests/unity/NifMergeHarness.cs."""
     tests = {
-        "body": lambda m: m["sourceFile"].lower().startswith("femalebody"),
+        # the skin-tinted slot in body slot 32: the character's own body, or an outfit's body copy
+        "body": lambda m: m["shaderType"] == 5 and 32 in m["slots"],
         "head": lambda m: m["shaderType"] == 4,  # FaceGen face shader
         "hair": lambda m: m["shaderType"] == 6 and bool(m["alphaFlags"] & (1 << 9)) and m["alphaProperty"]
                           and len(m["textures"]) > 1 and bool(m["textures"][1]),
@@ -108,14 +110,19 @@ def harness(unity: Path) -> bool:
     (project / "ProjectSettings" / "NifMergeSettings.asset").unlink(missing_ok=True)
 
     fbx = assets / "NifMergeTest" / "Character.fbx"
+    outfit_fbx = assets / "NifMergeTest" / "Outfit.fbx"  # the same character wearing the sample outfit
     parts = ["femalebody_0.nif", "femalehands_0.nif", "femalefeet_0.nif", "Head.nif"]
-    cmd = [NIFMERGE, "merge", "--skeleton", SAMPLES / "skeleton_female.nif", "--weight", "50",
-           "--tri", SAMPLES / "trifiles", "--out", fbx]
-    for p in parts:
-        cmd += ["--part", SAMPLES / p]
-    if run(cmd) != 0:
-        print(f"[{version}] NifMerge failed")
-        return False
+    outfit = ["clothing/Dress/01_LatexDress_0.nif", "clothing/Boots/02_HighBoots_0.nif", "clothing/Thong/03_String_0.nif"]
+    for out_fbx, wear in ((fbx, []), (outfit_fbx, outfit)):
+        cmd = [NIFMERGE, "merge", "--skeleton", SAMPLES / "skeleton_female.nif", "--weight", "50",
+               "--tri", SAMPLES / "trifiles", "--out", out_fbx]
+        for p in parts:
+            cmd += ["--part", SAMPLES / p]
+        for p in wear:
+            cmd += ["--wear", SAMPLES / p]
+        if run(cmd) != 0:
+            print(f"[{version}] NifMerge failed")
+            return False
 
     sidecar = json.loads(fbx.with_name("Character.materials.json").read_text())
     mats = sidecar["materials"]
@@ -125,9 +132,15 @@ def harness(unity: Path) -> bool:
     write_dds(tex / texture_rel(hair["textures"][0]), (128, 128, 128, 255), b"DXT5")
     write_dds(tex / texture_rel(hair["textures"][1]), (128, 64, 255, 100), b"DXT5")
     write_dds(tex / texture_rel(head["textures"][6]), (128, 128, 128, 255), b"DXT1")
-    # The user's real model-space normal maps: every _msn the sidecar names that samples/ holds.
+    # The outfit's items: a diffuse and a tangent-space normal map each.
+    outfit_mats = json.loads(outfit_fbx.with_name("Outfit.materials.json").read_text())["materials"]
+    for m in outfit_mats:
+        if m["role"] == "outfit" and not m["modelSpaceNormals"]:
+            write_dds(tex / texture_rel(m["textures"][0]), (40, 40, 48, 255), b"DXT1")
+            write_dds(tex / texture_rel(m["textures"][1]), (128, 128, 255, 255), b"DXT5")
+    # The user's real model-space normal maps: every _msn either sidecar names that samples/ holds.
     in_samples = {p.name.lower(): p for p in SAMPLES.glob("*.dds")}
-    for m in mats:
+    for m in mats + outfit_mats:
         if m["modelSpaceNormals"] and len(m["textures"]) > 1 and m["textures"][1]:
             src = in_samples.get(Path(m["textures"][1].replace("\\", "/")).name.lower())
             if src:

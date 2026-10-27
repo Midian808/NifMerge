@@ -12,6 +12,7 @@ using UnityEngine;
 public static class NifMergeHarness
 {
     const string Fbx = "Assets/NifMergeTest/Character.fbx";
+    const string OutfitFbx = "Assets/NifMergeTest/Outfit.fbx"; // the same character wearing the sample outfit
     static readonly List<string> Lines = new List<string>();
     static int failures, checks;
 
@@ -31,6 +32,7 @@ public static class NifMergeHarness
         {
             AssetDatabase.Refresh();
             RunChecks(outDir);
+            CheckOutfit(outDir);
             code = failures == 0 ? 0 : 1;
         }
         catch (Exception e)
@@ -185,6 +187,80 @@ public static class NifMergeHarness
                 UnityEngine.Object.DestroyImmediate(canonRoot);
             }
             Render(go, Path.Combine(outDir, "muscle_zero_pose.png"));
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(go);
+        }
+    }
+
+    // The character wearing the sample outfit (dress, boots, thong), imported automatically like any model:
+    // configured as a Humanoid, the replaced body parts absent, every material built, the dress's
+    // body copy baked from its model-space map, and the items' tangent-space maps converted.
+    static void CheckOutfit(string outDir)
+    {
+        var sidecar = Sidecar.TryLoad(OutfitFbx, out _);
+        var importer = AssetImporter.GetAtPath(OutfitFbx) as ModelImporter;
+        Check(sidecar != null && importer != null, "outfit: FBX imported with its sidecar");
+        if (sidecar == null || importer == null) return;
+        Check(importer.userData != null && importer.userData.StartsWith("nifmerge:") &&
+              importer.animationType == ModelImporterAnimationType.Human, "outfit: configured as a Humanoid");
+        var avatar = AssetDatabase.LoadAllAssetsAtPath(OutfitFbx).OfType<Avatar>().FirstOrDefault();
+        Check(avatar != null && avatar.isValid && avatar.isHuman, "outfit: avatar is valid and human");
+        string reportPath = NifMergeImporter.ReportPathFor(OutfitFbx);
+        var warnings = File.Exists(reportPath) ? File.ReadAllLines(reportPath).ToList() : new List<string>();
+        Lines.Add($"INFO outfit importer warnings ({warnings.Count}):");
+        foreach (var w in warnings) Lines.Add("INFO   " + w);
+
+        // What the outfit replaced, as the sidecar records it, is absent from the model.
+        var removed = sidecar.parts.Where(p => p.role == "character").SelectMany(p => p.removed).ToList();
+        Check(removed.Any(r => r.slot == 32 && r.wholeShape) && removed.Any(r => r.slot == 37 && r.wholeShape),
+              $"outfit: the sidecar records the body (32) and feet (37) replaced ({removed.Count} removals)");
+        foreach (var r in removed.Where(r => r.wholeShape))
+            Check(!sidecar.materials.Any(m => m.role == "character" && m.shape == r.shape),
+                  $"outfit: character '{r.shape}' replaced by {r.by} is not in the model");
+
+        var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(OutfitFbx);
+        var go = UnityEngine.Object.Instantiate(prefab);
+        go.transform.SetPositionAndRotation(Vector3.zero, Quaternion.identity);
+        try
+        {
+            var animator = go.GetComponent<Animator>();
+            if (animator) animator.enabled = false;
+            var smr = go.GetComponentInChildren<SkinnedMeshRenderer>();
+            Check(smr != null, "outfit: SkinnedMeshRenderer present");
+            if (smr == null) return;
+            var mats = smr.sharedMaterials;
+            Check(mats.Length == sidecar.materials.Length && smr.sharedMesh.subMeshCount == mats.Length,
+                  $"outfit: {mats.Length} material slots == {sidecar.materials.Length}");
+            for (int i = 0; i < Math.Min(mats.Length, sidecar.materials.Length); i++)
+            {
+                var e = sidecar.materials[i];
+                string path = mats[i] ? AssetDatabase.GetAssetPath(mats[i]) : "";
+                Check(path == $"Assets/NifMergeTest/Outfit_Materials/{e.name}.mat" && mats[i].shader.name == "Standard",
+                      $"outfit: slot {i} ({e.shape}, {e.role}) uses a Standard {e.name}.mat (got '{path}')");
+                if (e.role != "outfit" || e.modelSpaceNormals) continue;
+                // An item: diffuse from the textures root, tangent-space map converted, alpha mode from NiAlphaProperty.
+                Check(SameTexture(TexPath(mats[i], "_MainTex"), e.Texture(0)), $"outfit: {e.shape} diffuse assigned");
+                string n = TexPath(mats[i], "_BumpMap");
+                Check(n.EndsWith($"{Path.GetFileNameWithoutExtension(e.Texture(1).Replace('\\', '/'))}_unity_n.png"),
+                      $"outfit: {e.shape} normal map converted (got '{n}')");
+                float want = e.AlphaTest ? 1 : e.AlphaBlend ? 2 : 0;
+                Check(mats[i].GetFloat("_Mode") == want, $"outfit: {e.shape} rendering mode {mats[i].GetFloat("_Mode")}, expected {want}");
+            }
+            int body = Roles.Body(sidecar);
+            Check(body >= 0 && sidecar.materials[body].role == "outfit", "outfit: the body is the dress's own body copy");
+            CheckModelSpaceNormals(smr, sidecar, mats, warnings);
+
+            var baked = new Mesh();
+            smr.BakeMesh(baked);
+            var a = baked.vertices;
+            var b = smr.sharedMesh.vertices;
+            float worst = 0;
+            for (int i = 0; i < a.Length; i++) worst = Mathf.Max(worst, (a[i] - b[i]).magnitude);
+            Check(worst < 1e-4f, $"outfit: bind pose skins to the rest mesh (max error {worst:G3})");
+            UnityEngine.Object.DestroyImmediate(baked);
+            Render(go, Path.Combine(outDir, "outfit_bind_pose.png"));
         }
         finally
         {
@@ -355,8 +431,9 @@ public static class NifMergeHarness
     static class Roles
     {
         static int Find(Sidecar s, Func<MaterialEntry, bool> f) => Array.FindIndex(s.materials, m => f(m));
-        static bool From(MaterialEntry m, string part) => m.sourceFile.ToLowerInvariant().StartsWith(part);
-        public static int Body(Sidecar s) => Find(s, m => From(m, "femalebody"));
+        // The body is the skin-tinted slot in body slot 32: the character's own, or an outfit's body copy.
+        public static int Body(Sidecar s) =>
+            Find(s, m => m.shaderType == MaterialEntry.TypeSkinTint && m.slots != null && Array.IndexOf(m.slots, 32) >= 0);
         public static int Head(Sidecar s) => Find(s, m => m.shaderType == MaterialEntry.TypeFaceGen);
         public static int Hair(Sidecar s) =>
             Find(s, m => m.shaderType == MaterialEntry.TypeHairTint && m.AlphaTest && !string.IsNullOrEmpty(m.Texture(1)));
