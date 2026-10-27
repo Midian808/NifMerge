@@ -170,7 +170,9 @@ std::pair<size_t, int> SampleShapeCounts() {
 }
 
 TEST(FixturesPresent) {
-	for (auto& f : {Fx("skeleton_vanilla_le.nif"), Fx("femalebody_1_le.nif"), Fx("facegen_se.nif"),
+	for (auto& f : {Fx("skeleton_vanilla_le.nif"), Fx("femalebody_1_le.nif"), Fx("malebody_1_le.nif"), Fx("malehands_1_le.nif"),
+					Fx("malefeet_1_le.nif"), Fx("malehead_le.nif"), Fx("daedriccuirass_1_le.nif"), Fx("eyeschild_le.nif"),
+					Fx("eyeschild_le.tri"), Fx("facegen_se.nif"),
 					Fx("skeleton_female_xpmse.nif"), Fx("skeleton_male_xpmse.nif"), Sample("skeleton_female.nif"),
 					Sample("femalebody_0.nif"), Sample("femalebody_1.nif"), Sample("femalehands_0.nif"),
 					Sample("femalehands_1.nif"), Sample("femalefeet_0.nif"), Sample("femalefeet_1.nif"),
@@ -969,9 +971,10 @@ size_t SlotTriangles(const MergedModel& m, int slot) {
 // the plain slot, whether it survives (in order); empty means all of them. Where the slot meets a
 // shape the outfit replaced (`replaced`, a file name start) or the outfit's own surface, its vertices
 // join the item's surface instead, so their normals follow it: there only positions and UVs are compared.
+// Those seam vertices must be fewer than 1 in `seamShare` of the slot's (a low-poly slot has a larger share).
 void ExpectCharacterUnchanged(const MergedModel& m, const std::string& fileStart, const std::string& shape,
-							  const std::vector<bool>& keptOf = {}, const std::string& replaced = "") {
-	const MergedModel& plain = PlainModel();
+							  const std::vector<bool>& keptOf = {}, const std::string& replaced = "",
+							  const MergedModel& plain = PlainModel(), size_t seamShare = 20) {
 	const int a = SlotOf(plain, fileStart, shape), b = SlotOf(m, fileStart, shape);
 	CHECK(a >= 0 && b >= 0, "%s / %s present", fileStart.c_str(), shape.c_str());
 	if (a < 0 || b < 0) return;
@@ -1004,7 +1007,7 @@ void ExpectCharacterUnchanged(const MergedModel& m, const std::string& fileStart
 	CHECK(cb == want && j == want, "%s / %s keeps %u vertices, expected %zu", fileStart.c_str(), shape.c_str(), cb, want);
 	CHECK(pos < 1e-9 && nrm < 1e-9 && uv < 1e-9, "%s / %s unchanged by the outfit (position %g, normal %g, uv %g)",
 		  fileStart.c_str(), shape.c_str(), pos, nrm, uv);
-	CHECK(replaced.empty() || (atSeam > 0 && atSeam * 20 < want), "%s / %s: %zu vertices on the seam with %s", fileStart.c_str(),
+	CHECK(replaced.empty() || (atSeam > 0 && atSeam * seamShare < want), "%s / %s: %zu vertices on the seam with %s", fileStart.c_str(),
 		  shape.c_str(), atSeam, replaced.c_str());
 }
 
@@ -1243,6 +1246,383 @@ TEST(MissingBoneIsAnError) {
 		threw = std::string(e.what()).find("not present in the skeleton") != std::string::npos;
 	}
 	CHECK(threw, "a bone missing from the skeleton must be a hard error");
+}
+
+// ---- Skyrim LE (user 12, stream 83). The PyNifly LE fixtures are meshes as the game shipped them. The
+// backports are SE samples converted to LE by nifly's OptimizeFor, the conversion SSE NIF Optimizer runs
+// (with its head-part option for a FaceGen head), written to .tmp/tests/le.
+
+std::string LegacySkeleton() { return Fx("skeleton_vanilla_le.nif"); }
+std::vector<std::string> LegacyParts() {
+	return {Fx("malebody_1_le.nif"), Fx("malehands_1_le.nif"), Fx("malefeet_1_le.nif"), Fx("malehead_le.nif")};
+}
+
+const MergedModel& LegacyModel() {
+	static MergedModel m = MergeModel({LegacySkeleton(), PairPartFiles(LegacyParts()), 50}, Quiet);
+	return m;
+}
+
+bool IsLegacy(const std::string& path) {
+	nifly::NifFile nif;
+	return nif.Load(fs::u8path(path)) == 0 && nif.GetHeader().GetVersion().IsSK();
+}
+
+std::string BackportToLE(const std::string& src, const std::string& folder) {
+	nifly::NifFile nif;
+	CHECK(nif.Load(fs::u8path(src)) == 0 && nif.GetHeader().GetVersion().IsSSE(), "%s loads as SE", src.c_str());
+	bool head = false;
+	for (auto* s : nif.GetShapes()) head |= dynamic_cast<nifly::BSDynamicTriShape*>(s) != nullptr;
+	nifly::OptOptions opt;
+	opt.targetVersion = nifly::NiVersion::getSK();
+	opt.headParts = head;
+	opt.removeParallax = false;
+	opt.fixBSXFlags = false;
+	opt.fixShaderFlags = false;
+	const nifly::OptResult r = nif.OptimizeFor(opt);
+	CHECK(!r.versionMismatch && !r.dupesRenamed, "%s converts to LE", src.c_str());
+	const fs::path dir = fs::u8path(Tmp("le/" + folder));
+	fs::create_directories(dir);
+	const fs::path dst = dir / fs::u8path(src).filename();
+	CHECK(nif.Save(dst) == 0, "save %s", dst.u8string().c_str());
+	CHECK(IsLegacy(dst.u8string()), "%s is LE", dst.u8string().c_str());
+	return dst.u8string();
+}
+
+std::vector<PartInput> Backport(const std::vector<PartInput>& parts, const std::string& folder) {
+	std::vector<PartInput> out;
+	for (auto& p : parts)
+		out.push_back({BackportToLE(p.path0, folder), p.path1 ? std::optional<std::string>(BackportToLE(*p.path1, folder)) : std::nullopt});
+	return out;
+}
+
+// Copy of an LE nif in .tmp/tests/le/<folder> with every NiTriShape rewritten as NiTriStrips over the same
+// vertices, as older LE meshes store them: two triangles sharing an edge form a four-point strip, whose
+// second triangle the strip reads with reversed winding; the rest are three-point strips. Returns the
+// copy's path and how many four-point strips it holds.
+std::pair<std::string, size_t> StripifyLE(const std::string& src, const std::string& folder) {
+	nifly::NifFile nif;
+	CHECK(nif.Load(fs::u8path(src)) == 0 && nif.GetHeader().GetVersion().IsSK(), "%s loads as LE", src.c_str());
+	nifly::NiHeader& hdr = nif.GetHeader();
+	size_t quads = 0;
+	for (auto* shape : nif.GetShapes()) {
+		auto* triShape = dynamic_cast<nifly::NiTriShape*>(shape);
+		auto* data = triShape ? dynamic_cast<nifly::NiTriShapeData*>(triShape->GetGeomData()) : nullptr;
+		if (!data) continue;
+		std::vector<nifly::Triangle> tris;
+		data->GetTriangles(tris);
+		std::map<std::pair<uint16_t, uint16_t>, std::vector<size_t>> byEdge; // directed edge -> triangles holding it
+		for (size_t t = 0; t < tris.size(); t++) {
+			const auto& x = tris[t];
+			byEdge[{x.p1, x.p2}].push_back(t);
+			byEdge[{x.p2, x.p3}].push_back(t);
+			byEdge[{x.p3, x.p1}].push_back(t);
+		}
+		auto strips = std::make_unique<nifly::NiTriStripsData>();
+		static_cast<nifly::NiTriBasedGeomData&>(*strips) = static_cast<const nifly::NiTriBasedGeomData&>(*data);
+		std::vector<bool> used(tris.size(), false);
+		for (size_t t = 0; t < tris.size(); t++) {
+			if (used[t]) continue;
+			used[t] = true;
+			const auto& x = tris[t];
+			std::vector<uint16_t> strip{x.p1, x.p2, x.p3};
+			for (auto [a, b, c] : {std::array<uint16_t, 3>{x.p1, x.p2, x.p3}, std::array<uint16_t, 3>{x.p2, x.p3, x.p1},
+								   std::array<uint16_t, 3>{x.p3, x.p1, x.p2}}) {
+				// The neighbour across edge (b, c) holds it as (c, b): strip a b c d reads (a b c), then (b d c).
+				auto it = byEdge.find({c, b});
+				if (it == byEdge.end()) continue;
+				auto n = std::find_if(it->second.begin(), it->second.end(), [&](size_t u) { return !used[u]; });
+				if (n == it->second.end()) continue;
+				const auto& y = tris[*n];
+				const uint16_t d = y.p1 != b && y.p1 != c ? y.p1 : y.p2 != b && y.p2 != c ? y.p2 : y.p3;
+				used[*n] = true;
+				strip = {a, b, c, d};
+				quads++;
+				break;
+			}
+			uint16_t len = static_cast<uint16_t>(strip.size());
+			strips->stripsInfo.stripLengths.push_back(len);
+			strips->stripsInfo.points.push_back(strip);
+		}
+		auto stripShape = std::make_unique<nifly::NiTriStrips>();
+		static_cast<nifly::NiTriBasedGeom&>(*stripShape) = static_cast<const nifly::NiTriBasedGeom&>(*triShape);
+		hdr.ReplaceBlock(hdr.GetBlockID(data), std::move(strips));
+		hdr.ReplaceBlock(hdr.GetBlockID(triShape), std::move(stripShape));
+	}
+	nif.LinkGeomData();
+	const fs::path dir = fs::u8path(Tmp("le/" + folder));
+	fs::create_directories(dir);
+	const fs::path dst = dir / fs::u8path(src).filename();
+	CHECK(nif.Save(dst) == 0, "save %s", dst.u8string().c_str());
+	return {dst.u8string(), quads};
+}
+
+// The same character merged from two encodings of its files: everything Unity receives matches. Triangles
+// are compared per material slot as sets, each rotated to start at its lowest vertex (winding kept), since
+// a strip encoding lists them in another order. SSE NIF Optimizer's head-part option clears the
+// packed-tangent shader flag (it breaks LE head parts), so that flag is not compared. Vertex weights are
+// compared per bone (a bone missing on one side weighs 0). `tol` bounds position, normal and weight
+// differences: exact for re-encodings of the same file, looser for a conversion that changes the data.
+void ExpectSameModel(const MergedModel& a, const MergedModel& b, const char* tag, double tol = 1e-9) {
+	auto file = [](const std::string& p) { return fs::u8path(p).filename().u8string(); };
+	CHECK(a.bones.size() == b.bones.size(), "%s: %zu vs %zu bones", tag, a.bones.size(), b.bones.size());
+	CHECK(a.materials.size() == b.materials.size(), "%s: %zu vs %zu material slots", tag, a.materials.size(), b.materials.size());
+	CHECK(a.materialVertices == b.materialVertices, "%s: vertex ranges per slot differ", tag);
+	if (a.materials.size() != b.materials.size() || a.materialVertices != b.materialVertices) return;
+	const uint32_t flags2 = ~uint32_t(nifly::SLSF2_PACKED_TANGENT);
+	for (size_t i = 0; i < a.materials.size(); i++) {
+		const MaterialSlot &x = a.materials[i], &y = b.materials[i];
+		double rot = 0;
+		for (int r = 0; r < 3; r++)
+			for (int c = 0; c < 3; c++) rot = std::fmax(rot, std::fabs(x.skinToRest.m[r][c] - y.skinToRest.m[r][c]));
+		CHECK(x.name == y.name && x.shapeName == y.shapeName && file(x.sourceFile) == file(y.sourceFile) &&
+				  x.shaderBlock == y.shaderBlock && x.shaderType == y.shaderType && x.shaderFlags1 == y.shaderFlags1 &&
+				  (x.shaderFlags2 & flags2) == (y.shaderFlags2 & flags2) && x.textures == y.textures &&
+				  x.hasAlphaProperty == y.hasAlphaProperty && x.alphaFlags == y.alphaFlags && x.alphaThreshold == y.alphaThreshold &&
+				  x.glossiness == y.glossiness && x.specularStrength == y.specularStrength && x.emissiveMultiple == y.emissiveMultiple &&
+				  x.alpha == y.alpha && x.doubleSided == y.doubleSided && x.modelSpaceNormals == y.modelSpaceNormals &&
+				  x.vertexColors == y.vertexColors && x.vertexAlpha == y.vertexAlpha && x.role == y.role && x.slots == y.slots &&
+				  rot < 1e-9,
+			  "%s: material %s differs", tag, x.name.c_str());
+	}
+	CHECK(a.positions.size() == b.positions.size() && a.normals.size() == b.normals.size() && a.uvs.size() == b.uvs.size() &&
+			  a.colors.size() == b.colors.size() && a.weights.size() == b.weights.size(),
+		  "%s: vertex attribute counts differ", tag);
+	if (a.positions.size() != b.positions.size() || a.normals.size() != b.normals.size() || a.uvs.size() != b.uvs.size() ||
+		a.colors.size() != b.colors.size() || a.weights.size() != b.weights.size())
+		return;
+	double pos = 0, nrm = 0, uv = 0, col = 0, wt = 0;
+	for (size_t v = 0; v < a.positions.size(); v++) {
+		pos = std::fmax(pos, (a.positions[v] - b.positions[v]).length());
+		nrm = std::fmax(nrm, (a.normals[v] - b.normals[v]).length());
+		uv = std::fmax(uv, std::fabs(a.uvs[v][0] - b.uvs[v][0]) + std::fabs(a.uvs[v][1] - b.uvs[v][1]));
+		if (!a.colors.empty())
+			for (int k = 0; k < 4; k++) col = std::fmax(col, std::fabs(a.colors[v][k] - b.colors[v][k]));
+		std::map<int, double> w;
+		for (auto& [bone, x] : a.weights[v]) w[bone] += x;
+		for (auto& [bone, x] : b.weights[v]) w[bone] -= x;
+		for (auto& [bone, d] : w) wt = std::fmax(wt, std::fabs(d));
+	}
+	CHECK(pos < tol && nrm < tol && uv < 1e-9 && col < 1e-9 && wt < tol,
+		  "%s: vertices differ (position %g, normal %g, uv %g, colour %g, weight %g)", tag, pos, nrm, uv, col, wt);
+	auto trisBySlot = [](const MergedModel& m) {
+		std::vector<std::vector<std::array<uint32_t, 3>>> out(m.materials.size());
+		for (size_t t = 0; t < m.tris.size(); t++) {
+			auto x = m.tris[t];
+			std::rotate(x.begin(), std::min_element(x.begin(), x.end()), x.end());
+			out[m.triMaterial[t]].push_back(x);
+		}
+		for (auto& s : out) std::sort(s.begin(), s.end());
+		return out;
+	};
+	CHECK(a.tris.size() == b.tris.size() && trisBySlot(a) == trisBySlot(b), "%s: triangles differ (%zu vs %zu)", tag, a.tris.size(),
+		  b.tris.size());
+	CHECK(a.blendShapes.size() == b.blendShapes.size(), "%s: %zu vs %zu blend shapes", tag, a.blendShapes.size(), b.blendShapes.size());
+	for (size_t i = 0; i < std::min(a.blendShapes.size(), b.blendShapes.size()); i++) {
+		const BlendShape &x = a.blendShapes[i], &y = b.blendShapes[i];
+		double d = 0;
+		if (x.vertices == y.vertices)
+			for (size_t k = 0; k < x.deltas.size(); k++) d = std::fmax(d, (x.deltas[k] - y.deltas[k]).length());
+		CHECK(x.name == y.name && x.vertices == y.vertices && d < tol, "%s: blend shape %s differs (offset %g)", tag, x.name.c_str(), d);
+	}
+	CHECK(a.morphSources.size() == b.morphSources.size(), "%s: %zu vs %zu morph sources", tag, a.morphSources.size(),
+		  b.morphSources.size());
+	for (size_t i = 0; i < std::min(a.morphSources.size(), b.morphSources.size()); i++) {
+		const MorphSource &x = a.morphSources[i], &y = b.morphSources[i];
+		CHECK(file(x.file) == file(y.file) && x.shape == y.shape && x.mode == y.mode && x.windowStart == y.windowStart &&
+				  x.sameTriangles == y.sameTriangles && x.morphs == y.morphs && x.outcome == y.outcome,
+			  "%s: %s decided differently ('%s' vs '%s')", tag, file(x.file).c_str(), x.outcome.c_str(), y.outcome.c_str());
+	}
+	CHECK(a.parts.size() == b.parts.size(), "%s: %zu vs %zu parts", tag, a.parts.size(), b.parts.size());
+	for (size_t i = 0; i < std::min(a.parts.size(), b.parts.size()); i++) {
+		const PartReport &x = a.parts[i], &y = b.parts[i];
+		bool same = file(x.file) == file(y.file) && x.role == y.role && x.slots == y.slots && x.head == y.head &&
+					x.removed.size() == y.removed.size();
+		for (size_t k = 0; same && k < x.removed.size(); k++) {
+			const auto &r = x.removed[k], &s = y.removed[k];
+			same = r.shape == s.shape && r.slot == s.slot && r.triangles == s.triangles && r.wholeShape == s.wholeShape && file(r.by) == file(s.by);
+		}
+		CHECK(same, "%s: part %s reported differently", tag, file(x.file).c_str());
+	}
+}
+
+TEST(LegacyReposeMatchesGameFormula) {
+	for (auto& f : LegacyParts()) CHECK(MaxReposeError(f, LegacySkeleton()) < 1e-3, "%s", f.c_str());
+	for (auto& f : {Fx("daedriccuirass_1_le.nif"), Fx("eyeschild_le.nif")}) CHECK(MaxReposeError(f, LegacySkeleton()) < 1e-3, "%s", f.c_str());
+}
+
+TEST(MergeLegacyCharacter) {
+	for (auto& f : LegacyParts()) CHECK(IsLegacy(f), "%s is LE", f.c_str());
+	const MergedModel& m = LegacyModel();
+	std::map<std::string, int> human;
+	for (auto& b : m.bones)
+		if (!b.humanoid.empty()) human[b.humanoid]++;
+	for (auto& h : HumanoidMap()) CHECK(human[h.unity] == 1, "humanoid %s mapped %d times", h.unity, human[h.unity]);
+	size_t badWeights = 0;
+	for (auto& vw : m.weights) {
+		double sum = 0;
+		for (auto& [b, w] : vw) {
+			if (b < 0 || b >= static_cast<int>(m.bones.size())) badWeights++;
+			sum += w;
+		}
+		if (std::fabs(sum - 1) > 1e-4) badWeights++;
+	}
+	CHECK(badWeights == 0, "%zu invalid vertex weights", badWeights);
+	CheckSeamNormals(m, "LE character");
+	// Materials as the LE shader and texture-set blocks give them.
+	const int body = SlotOf(m, "malebody_1_le", "MaleUnderwearBody:0"), head = SlotOf(m, "malehead_le", "MaleHeadIMF");
+	const int hands = SlotOf(m, "malehands_1_le", "HandMaleBig3rd"), feet = SlotOf(m, "malefeet_1_le", "FootMale_Big");
+	CHECK(body >= 0 && head >= 0 && hands >= 0 && feet >= 0, "LE body, head, hands and feet slots present");
+	if (body < 0 || head < 0 || hands < 0 || feet < 0) return;
+	const MaterialSlot &b = m.materials[body], &h = m.materials[head];
+	CHECK(b.shaderBlock == "BSLightingShaderProperty" && b.shaderType == 5 && b.modelSpaceNormals && !b.textures.empty() &&
+			  Lower(b.textures[0]) == "textures\\actors\\character\\male\\malebody_1.dds",
+		  "LE body material: %s type %u texture '%s'", b.shaderBlock.c_str(), b.shaderType, b.textures.empty() ? "" : b.textures[0].c_str());
+	CHECK(h.shaderType == 4 && h.modelSpaceNormals && !h.textures.empty() &&
+			  Lower(h.textures[0]) == "textures\\actors\\character\\male\\malehead.dds",
+		  "LE head material: type %u texture '%s'", h.shaderType, h.textures.empty() ? "" : h.textures[0].c_str());
+	CHECK(b.slots == (std::vector<uint16_t>{32, 34, 38}) && m.materials[hands].slots == std::vector<uint16_t>{33} &&
+			  m.materials[feet].slots == std::vector<uint16_t>{37} && m.materials[head].slots == (std::vector<uint16_t>{130, 143, 230}),
+		  "LE dismember partitions give body 32/34/38, hands 33, feet 37, head 130/143/230");
+	const PartReport* headPart = ReportOf(m, "malehead_le");
+	CHECK(headPart && headPart->head, "the LE head's partitions mark it as a head part");
+}
+
+TEST(LegacyStripsMatchShapes) {
+	auto [strips, quads] = StripifyLE(Fx("femalebody_1_le.nif"), "strips");
+	nifly::NifFile nif;
+	CHECK(nif.Load(fs::u8path(strips)) == 0, "load %s", strips.c_str());
+	size_t stripShapes = 0;
+	for (auto* s : nif.GetShapes()) stripShapes += dynamic_cast<nifly::NiTriStrips*>(s) != nullptr;
+	CHECK(stripShapes == nif.GetShapes().size() && stripShapes > 0, "every shape of the copy is NiTriStrips");
+	CHECK(quads > 1000, "%zu four-point strips, so the alternating winding is exercised", quads);
+	CHECK(MaxReposeError(strips, LegacySkeleton()) < 1e-3, "LE strips body re-poses by the game formula");
+	ExpectSameModel(MergeModel({LegacySkeleton(), {{strips, std::nullopt}}, 50}, Quiet),
+					MergeModel({LegacySkeleton(), {{Fx("femalebody_1_le.nif"), std::nullopt}}, 50}, Quiet), "strips vs shapes");
+}
+
+TEST(LegacyOutfitCuirass) {
+	MergeRequest req{LegacySkeleton(), PairPartFiles(LegacyParts()), 50};
+	req.outfit = PairPartFiles({Fx("daedriccuirass_1_le.nif")});
+	MergedModel m = MergeModel(req, Quiet);
+	const int torso = SlotOf(m, "daedriccuirass_1_le", "TorsoLow:0"), glow = SlotOf(m, "daedriccuirass_1_le", "MaleTorsoGlow");
+	CHECK(torso >= 0 && glow >= 0 && m.materials[torso].role == "outfit" && m.materials[glow].role == "outfit", "the cuirass is worn");
+	CHECK(SlotOf(m, "malebody_1_le", "MaleUnderwearBody:0") < 0, "the LE body (slot 32) is replaced");
+	const PartReport* body = ReportOf(m, "malebody_1_le");
+	CHECK(body && !body->removed.empty(), "the LE body reports what the cuirass hid");
+	if (body)
+		for (auto& r : body->removed)
+			CHECK(Lower(fs::u8path(r.by).filename().u8string()) == "daedriccuirass_1_le.nif", "%s removed by the cuirass", r.shape.c_str());
+	// An LE effect shader keeps its texture outside a texture set.
+	if (glow >= 0) {
+		const MaterialSlot& g = m.materials[glow];
+		CHECK(g.shaderBlock == "BSEffectShaderProperty" && !g.textures.empty() && Lower(g.textures[0]) == "textures\\effects\\vaportile02.dds" &&
+				  g.hasAlphaProperty && g.alphaFlags == 4333,
+			  "LE effect material: %s texture '%s' alpha %u", g.shaderBlock.c_str(), g.textures.empty() ? "" : g.textures[0].c_str(),
+			  g.alphaFlags);
+	}
+	ExpectCharacterUnchanged(m, "malehands_1_le", "HandMaleBig3rd", {}, "malebody_1_le", LegacyModel());
+	ExpectCharacterUnchanged(m, "malefeet_1_le", "FootMale_Big", {}, "malebody_1_le", LegacyModel(), 8); // 218 vertices, 22 at the ankle
+	ExpectCharacterUnchanged(m, "malehead_le", "MaleHeadIMF", {}, "malebody_1_le", LegacyModel());
+}
+
+TEST(LegacyEyesMorphsByIndex) {
+	MergedModel m = MergeModel({LegacySkeleton(), {{Fx("eyeschild_le.nif"), std::nullopt}}, 50, {Fx("eyeschild_le.tri")}}, Quiet);
+	CHECK(m.morphSources.size() == 1 && m.morphSources[0].outcome == "applied" && m.morphSources[0].mode == "index",
+		  "eyeschild_le.tri applied by index (%s)", m.morphSources.empty() ? "none" : m.morphSources[0].outcome.c_str());
+	TriFile tri = ReadTri(Fx("eyeschild_le.tri"));
+	CHECK(m.materials.size() == 1 && tri.vertices.size() == m.materialVertices[0].second, "TRI and LE eyes share their vertices");
+	if (m.materials.size() != 1 || tri.vertices.size() != m.materialVertices[0].second) return;
+	const Mat3& rot = m.materials[0].skinToRest;
+	size_t compared = 0;
+	for (auto& morph : tri.morphs) {
+		double peak = 0;
+		for (auto& d : morph.deltas) peak = std::fmax(peak, d.length());
+		if (peak < 1e-7) continue;
+		const BlendShape* b = FindBlendShape(m, morph.name);
+		CHECK(b, "%s is a blend shape", morph.name.c_str());
+		if (!b) continue;
+		std::vector<Vec3> got(tri.vertices.size());
+		for (size_t i = 0; i < b->vertices.size(); i++) got[b->vertices[i]] = b->deltas[i];
+		double worst = 0;
+		for (size_t v = 0; v < tri.vertices.size(); v++) {
+			Vec3 want = rot * morph.deltas[v];
+			if (want.length() < 1e-7) want = Vec3();
+			worst = std::fmax(worst, (got[v] - want).length());
+		}
+		CHECK(worst < 1e-9, "%s reproduced on the LE eyes (error %g)", morph.name.c_str(), worst);
+		compared++;
+	}
+	CHECK(compared > 0, "%zu LE eye morphs compared", compared);
+}
+
+// The game's own male head masks and brows on the game's own LE male head: each lies on the head's surface.
+TEST(LegacyMaleHeadTakesMaleMasks) {
+	MergedModel m = MergeModel({LegacySkeleton(), PairPartFiles(LegacyParts()), 50,
+								{Sample("trifiles/MaleHeadmaskLeftside.tri"), Sample("trifiles/MaleHeadmaskRightside.tri"),
+								 Sample("trifiles/MaleHeadbrows.tri")}},
+							   Quiet);
+	const int head = SlotOf(m, "malehead_le", "MaleHeadIMF");
+	CHECK(head >= 0 && m.morphSources.size() == 3, "three sources for the LE head");
+	if (head < 0) return;
+	size_t headMoved = 0;
+	for (auto& s : m.morphSources) {
+		CHECK(s.outcome == "applied" && s.mode == "surface" && s.shape == m.materials[head].name && s.p90 < 0.01,
+			  "%s on the LE male head: %s %s p90 %.4f", fs::u8path(s.file).filename().u8string().c_str(), s.outcome.c_str(), s.mode.c_str(), s.p90);
+		for (auto& n : s.morphs)
+			if (const BlendShape* b = FindBlendShape(m, n))
+				for (uint32_t v : b->vertices) headMoved += SlotOfVertex(m, v) == head;
+	}
+	CHECK(headMoved > 100, "the masks move %zu LE head vertices", headMoved);
+}
+
+// The conversion itself moves the data a little: the LE skin carries the SE file's NiSkinData weights,
+// which differ from the SE vertex weights the SE merge reads by up to about 2.5e-4 and leave out
+// influences below 1e-4. Each LE file's own data is checked exactly by the game-formula re-pose.
+constexpr double kBackportTol = 5e-4;
+
+void ExpectBackportReposes(const MergeRequest& le) {
+	std::vector<std::string> files;
+	for (auto& list : {le.parts, le.outfit})
+		for (auto& p : list) {
+			files.push_back(p.path0);
+			if (p.path1) files.push_back(*p.path1);
+		}
+	for (auto& f : files)
+		if (IsLegacy(f)) CHECK(MaxReposeError(f, le.skeletonPath) < 1e-3, "%s re-poses by the game formula", f.c_str());
+}
+
+// The user's SE character, FaceGen head and outfit, all backported to LE: the merge is the SE merge.
+TEST(BackportedCharacterMatchesSE) {
+	const auto parts = PairPartFiles(SampleParts()), outfit = PairPartFiles({Dress(), Boots(), Thong()});
+	MergeRequest se{Sample("skeleton_female.nif"), parts, 50, {Sample("trifiles")}, outfit};
+	MergeRequest le{BackportToLE(Sample("skeleton_female.nif"), "skeleton"), Backport(parts, "character"), 50, {Sample("trifiles")},
+					Backport(outfit, "outfit")};
+	nifly::NifFile head;
+	head.Load(fs::u8path(Tmp("le/character/Head.nif")));
+	size_t dynamic = 0, shapes = 0;
+	for (auto* s : head.GetShapes()) {
+		dynamic += dynamic_cast<nifly::BSDynamicTriShape*>(s) != nullptr;
+		shapes += dynamic_cast<nifly::NiTriShape*>(s) != nullptr;
+	}
+	CHECK(dynamic == 0 && shapes > 0, "the LE FaceGen head holds NiTriShapes only");
+	ExpectBackportReposes(le);
+	ExpectSameModel(MergeModel(le, Quiet), MergeModel(se, Quiet), "LE backport vs SE", kBackportTol);
+}
+
+// LE and SE files in one character: an LE head and dress with the SE body, hands, feet and boots.
+TEST(MixedLegacyAndSpecialEdition) {
+	auto parts = PairPartFiles(SampleParts());
+	auto outfit = PairPartFiles({Dress(), Boots()});
+	MergeRequest se{Sample("skeleton_female.nif"), parts, 50, {Sample("trifiles")}, outfit};
+	MergeRequest mixed = se;
+	for (auto& p : mixed.parts)
+		if (fs::u8path(p.path0).filename() == "Head.nif") p = Backport({p}, "mixed")[0];
+	mixed.outfit[0] = Backport({mixed.outfit[0]}, "mixed")[0];
+	CHECK(IsLegacy(mixed.parts[3].path0) && IsLegacy(mixed.outfit[0].path0) && !IsLegacy(mixed.parts[0].path0) &&
+			  !IsLegacy(mixed.outfit[1].path0),
+		  "head and dress LE, the rest SE");
+	ExpectBackportReposes(mixed);
+	ExpectSameModel(MergeModel(mixed, Quiet), MergeModel(se, Quiet), "mixed LE/SE vs SE", kBackportTol);
 }
 
 TEST(FbxRoundTrip) {

@@ -234,6 +234,14 @@ built around. glTF imports through packages that do not support Humanoid avatar 
   at all-zero muscles, our avatar's limb angles must equal those of a synthetic humanoid built in an
   exact T-pose (Unity's zero-muscle pose is not itself a T-pose, so this is compared against a
   canonical rig rather than assumed). Screenshots: bind pose, reference T-pose, zero-muscle pose.
+- **Skyrim LE (stream 83):** read through the same nifly calls as SE, with no version branch.
+  `core_tests` covers it with the game's own LE meshes (male body, hands, feet, head, a cuirass with
+  an effect shader, child eyes with their `.tri`), an `NiTriStrips` copy of an LE body (no LE strips
+  mesh is in the fixtures, so the test writes one from the LE body: shared-edge pairs as four-point
+  strips), and the sample set backported to LE with nifly's `OptimizeFor` (SSE NIF Optimizer's
+  conversion, head-part option for the FaceGen head), alone and mixed with SE files. A backport merges
+  as the SE set does within 5e-4: the LE skin carries the SE file's `NiSkinData` weights, which differ
+  slightly from the SE vertex weights; each LE file is checked exactly by the re-pose oracle.
 - **Fixtures:** the Skyrim/SkyrimSE NIFs in the PyNifly repo, **plus your own real set** (body
   `_0`/`_1`, hands, feet, an in-game FaceGen head, the skeleton), because the FaceGen offset bug is the
   thing this tool exists to fix.
@@ -376,6 +384,15 @@ failed with them (median 9.29° against the source's 7.72°) and passes without 
   vertices there); the back of the head untouched; full-shape FBX round trip within 2 µm.
 - Unity: all 93 imported by name, zero weights leave the mesh at rest, blink side and direction,
   `Aah` below the eyes and moving down, every morph confined to head parts, face renders.
+
+**Open gap: vanilla male head with the mixed `.tri` set.** A vanilla male head (PyNifly's
+`malehead.nif`, LE and SE alike) given all of `samples/trifiles` takes the wrong sources. The female
+eye files (`EyesFemaleLeft/Right.tri` and EFA's `expr_` copies, p90 about 0.49) and the female and EFA
+head masks (p90 0.16–0.18) are applied to the head as surface masks; there is no eye shape to take the
+eye files. The HPH male masks and brows (p90 0.032) supersede the game's own vanilla ones (p90 0.004),
+because same-named alternatives prefer the denser mesh before the closer fit. The sample head is a
+female HPH head, so the existing checks never exercise this. With only the game's male masks and
+brows, the head takes exactly those (`LegacyMaleHeadTakesMaleMasks`).
 
 ### 2.3 Clothing (built)
 
