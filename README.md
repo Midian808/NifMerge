@@ -28,14 +28,22 @@ used by several parts becomes one blend shape that moves them all.
 Point it at the expression `.tri` files for your head parts. A folder of mixed files is fine: each
 file is matched to a head part by its geometry, and the log (and `morphSources` in the sidecar) says
 what was applied where and why the rest were not:
-- **index**: same vertex count as a part, vertex for vertex (e.g. a mouth);
+- **index**: same vertex count as a part, vertex for vertex (e.g. a mouth). A file with the part's
+  own triangles is used however much the part has been sculpted (e.g. the High Poly Head's
+  `femalehead.tri` on a FaceGen head);
 - **window**: a run of a part's vertices (e.g. one eye of a two-eye mesh);
-- **surface**: a lower-resolution mask lying on a part's surface (e.g. High Poly Head face masks),
-  transferred through the nearest mask triangle and fading out at its edge.
+- **surface**: a lower-resolution mask lying on a part's surface (e.g. High Poly Head face masks).
+  Vertices close to a same-facing mask surface take its motion directly. Surfaces the mask does not
+  describe (the top and inside of the lips) and the band around the mask's edge are smoothed across
+  the part's own mesh, so they move with the skin they are attached to and ease out at the edge.
 
 Files for a different head (another sex, another head mesh) fail the fit and are skipped.
 Same-named files in different folders are alternatives, and the stronger, denser match wins.
-Character-creation (`chargen`) morphs are not needed: a FaceGen head already has them baked in.
+Otherwise morphs are chosen by name. Files giving a part different morphs all apply, e.g. an
+animation mod's `EXPR_` morphs beside the game's own. Where two files give the same morph to the
+same part, the closer match keeps it: a full-mesh file over a mask, and the better-fitting of two
+masks covering the same area.
+Character-creation (`*chargen.tri`) files are skipped: a FaceGen head already has them baked in.
 
 ### Unity side
 

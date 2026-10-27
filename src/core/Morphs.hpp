@@ -9,12 +9,15 @@ std::vector<std::string> ExpandMorphPaths(const std::vector<std::string>& paths)
 // Matches each .tri to the merged mesh by geometry and adds its morphs as blend shapes.
 // A TRI's base mesh is compared with every material slot in the rest pose (rest = skinToRest * tri + t,
 // with t solved per candidate):
-//   index   - same vertex count, vertex i to vertex i
+//   index   - same vertex count, vertex i to vertex i; accepted within the distance limits, or at any
+//             distance when the TRI's triangles are the slot's own (a sculpted FaceGen head)
 //   window  - fewer vertices, vertex i to vertex start + i (e.g. one eye of a two-eye mesh)
-//   surface - a lower-resolution mask lying on the slot's surface; its morph is transferred to the
-//             slot's vertices through the nearest mask triangle, fading to zero away from the mask
+//   surface - a lower-resolution mask lying on the slot's surface; slot vertices near a same-facing
+//             mask surface take its motion, the rest are smoothed across the slot's own mesh
 // Same-named files are alternatives: the stronger match wins (index > window > surface), then the
-// denser mesh. Every decision is logged and recorded in m.morphSources.
+// denser mesh. Files named *chargen.tri (character-creation sliders) are skipped. Otherwise sources are
+// chosen per morph name: files giving a part different names all apply, and a name given twice to the
+// same vertices stays with the closer source. Every decision is logged and recorded in m.morphSources.
 void ApplyMorphs(MergedModel& m, const std::vector<std::string>& paths, const LogFn& log);
 
 } // namespace nm

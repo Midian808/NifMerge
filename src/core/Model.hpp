@@ -114,6 +114,8 @@ struct MorphSource {
 	std::string mode;    // "index", "window", "surface", or empty
 	uint32_t windowStart = 0;
 	double median = 0, p90 = 0, max = 0; // fit distances, game units
+	bool sameTriangles = false;          // index fit with the shape's own triangles (accepted at any distance)
+	std::vector<std::string> morphs;     // morph names this file gives (applied files only)
 	std::string outcome; // "applied", or why not
 };
 

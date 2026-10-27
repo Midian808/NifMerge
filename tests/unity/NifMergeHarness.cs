@@ -538,6 +538,9 @@ public static class NifMergeHarness
         RenderFace(go, smr, Path.Combine(outDir, "face_aah.png"), new[] { "Aah" });
         RenderFace(go, smr, Path.Combine(outDir, "face_blink.png"), new[] { "BlinkLeft", "BlinkRight" });
         RenderFace(go, smr, Path.Combine(outDir, "face_happy.png"), new[] { "MoodHappy" });
+        RenderFace(go, smr, Path.Combine(outDir, "face_bigaah.png"), new[] { "BigAah" });
+        RenderFace(go, smr, Path.Combine(outDir, "face_oh.png"), new[] { "Oh" });
+        RenderFace(go, smr, Path.Combine(outDir, "face_oohq.png"), new[] { "OohQ" });
         for (int i = 0; i < mesh.blendShapeCount; i++) smr.SetBlendShapeWeight(i, 0f);
     }
 

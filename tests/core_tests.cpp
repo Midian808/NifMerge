@@ -11,7 +11,11 @@
 #include "NifFile.hpp"
 #include <fbxsdk.h>
 
+#include <algorithm>
 #include <cctype>
+#include <cstring>
+#include <fstream>
+#include <iterator>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -357,12 +361,46 @@ TEST(ModelSpaceNormalMatrix) {
 	CHECK(expectedMsn > 0 && msn == expectedMsn, "%d model-space slots expected, got %d", expectedMsn, msn);
 }
 
-// ---- Facial morphs (.tri). samples/trifiles holds a mixed female/male, vanilla/High-Poly-Head set.
+// ---- Facial morphs (.tri). samples/trifiles holds a mixed female/male, vanilla/High-Poly-Head set,
+// including HPH/femalehead.tri, the full morph file of the High Poly Head mesh the sample head is sculpted
+// from, the HPH chargen files, and HPH/EFA: an animation mod's EXPR_ morphs for the same parts (mouth, eyes,
+// brows, and face masks for both the vanilla and the High Poly Head).
 
 const MergedModel& MorphModel() {
 	static MergedModel m = MergeModel(
 		{Sample("skeleton_female.nif"), PairPartFiles(SampleParts()), 50, {Sample("trifiles")}}, Quiet);
 	return m;
+}
+
+// The same set without the full head TRI, so the head takes its morphs from the HPH face masks.
+const MergedModel& SurfaceModel() {
+	static MergedModel m = [] {
+		std::vector<std::string> files;
+		for (auto& f : ExpandMorphPaths({Sample("trifiles")}))
+			if (Lower(fs::u8path(f).filename().u8string()) != "femalehead.tri") files.push_back(f);
+		return MergeModel({Sample("skeleton_female.nif"), PairPartFiles(SampleParts()), 50, files}, Quiet);
+	}();
+	return m;
+}
+
+// Morph sources keyed "<folder>/<file>", lower case.
+std::map<std::string, const MorphSource*> SourcesByFile(const MergedModel& m) {
+	std::map<std::string, const MorphSource*> by;
+	for (auto& s : m.morphSources)
+		by[Lower(fs::u8path(s.file).parent_path().filename().u8string() + "/" + fs::u8path(s.file).filename().u8string())] = &s;
+	return by;
+}
+
+void ExpectApplied(const MergedModel& m, const std::string& key, const char* mode, int slot, uint32_t start) {
+	auto by = SourcesByFile(m);
+	auto it = by.find(Lower(key));
+	CHECK(it != by.end(), "%s not reported", key.c_str());
+	if (it == by.end()) return;
+	const MorphSource& s = *it->second;
+	CHECK(s.outcome == "applied", "%s: %s", key.c_str(), s.outcome.c_str());
+	CHECK(s.mode == mode, "%s mode %s, expected %s", key.c_str(), s.mode.c_str(), mode);
+	CHECK(slot >= 0 && s.shape == m.materials[slot].name, "%s applied to '%s'", key.c_str(), s.shape.c_str());
+	CHECK(s.windowStart == start, "%s window start %u, expected %u", key.c_str(), s.windowStart, start);
 }
 
 const BlendShape* FindBlendShape(const MergedModel& m, const std::string& name) {
@@ -404,19 +442,8 @@ TEST(TriFilesRead) {
 
 TEST(MorphSourceDecisions) {
 	const MergedModel& m = MorphModel();
-	std::map<std::string, const MorphSource*> by;
-	for (auto& s : m.morphSources)
-		by[Lower(fs::u8path(s.file).parent_path().filename().u8string() + "/" + fs::u8path(s.file).filename().u8string())] = &s;
-	auto expect = [&](const std::string& key, const char* mode, int slot, uint32_t start) {
-		auto it = by.find(Lower(key));
-		CHECK(it != by.end(), "%s not reported", key.c_str());
-		if (it == by.end()) return;
-		const MorphSource& s = *it->second;
-		CHECK(s.outcome == "applied", "%s: %s", key.c_str(), s.outcome.c_str());
-		CHECK(s.mode == mode, "%s mode %s, expected %s", key.c_str(), s.mode.c_str(), mode);
-		CHECK(slot >= 0 && s.shape == m.materials[slot].name, "%s applied to '%s'", key.c_str(), s.shape.c_str());
-		CHECK(s.windowStart == start, "%s window start %u, expected %u", key.c_str(), s.windowStart, start);
-	};
+	const auto by = SourcesByFile(m);
+	auto expect = [&](const std::string& key, const char* mode, int slot, uint32_t start) { ExpectApplied(m, key, mode, slot, start); };
 	const int head = SlotByShader(m, 4);
 	int mouth = -1, eyes = -1, brows = -1;
 	for (size_t i = 0; i < m.materials.size(); i++) {
@@ -429,8 +456,54 @@ TEST(MorphSourceDecisions) {
 	expect("trifiles/EyesFemaleLeft.tri", "window", eyes, 0);
 	expect("trifiles/EyesFemaleRight.tri", "window", eyes, 88);
 	expect("hph/femaleheadbrows.tri", "index", brows, 0);
-	expect("hph/femaleheadmaskleftside.tri", "surface", head, 0);
-	expect("hph/femaleheadmaskrightside.tri", "surface", head, 0);
+	expect("hph/femalehead.tri", "index", head, 0);
+	// EFA's EXPR_ files apply beside the game's own: their names differ.
+	expect("efa/expr_mouthhumanf.tri", "index", mouth, 0);
+	expect("efa/expr_eyesfemaleleft.tri", "window", eyes, 0);
+	expect("efa/expr_eyesfemaleright.tri", "window", eyes, 88);
+	expect("efa/femaleheadbrows_expr.tri", "index", brows, 0);
+	expect("efa/femaleheadmaskleftside_expr.tri", "surface", head, 0);
+	expect("efa/femaleheadmaskrightside_expr.tri", "surface", head, 0);
+	auto expectNot = [&](const std::string& key, const char* outcomePrefix) {
+		auto it = by.find(key);
+		CHECK(it != by.end() && it->second->outcome.rfind(outcomePrefix, 0) == 0, "%s: %s (expected %s...)", key.c_str(),
+			  it != by.end() ? it->second->outcome.c_str() : "not reported", outcomePrefix);
+	};
+	// The head has an exact source for every name of the game's face masks, so they give it nothing.
+	expectNot("hph/femaleheadmaskleftside.tri", "skipped: '");
+	expectNot("hph/femaleheadmaskrightside.tri", "skipped: '");
+	// EFA's vanilla-head masks share their names with its High Poly Head masks and fit worse.
+	expectNot("efa/expr_femaleheadmaskleftside.tri", "superseded by");
+	expectNot("efa/expr_femaleheadmaskrightside.tri", "superseded by");
+	// EFA's vanilla brows fit only as a surface, and the brows' exact EXPR_ source gives all its names.
+	expectNot("efa/expr_femaleheadbrows.tri", "skipped: '");
+	for (const char* key : {"hph/femaleheadbrowschargen.tri", "hph/femaleheadmaskleftsidechargen.tri",
+							"hph/femaleheadmaskrightsidechargen.tri"})
+		expectNot(key, "skipped: character-creation");
+	// Without the full head TRI both mask sets carry the head, each with its own names.
+	ExpectApplied(SurfaceModel(), "hph/femaleheadmaskleftside.tri", "surface", head, 0);
+	ExpectApplied(SurfaceModel(), "hph/femaleheadmaskrightside.tri", "surface", head, 0);
+	ExpectApplied(SurfaceModel(), "efa/femaleheadmaskleftside_expr.tri", "surface", head, 0);
+	ExpectApplied(SurfaceModel(), "efa/femaleheadmaskrightside_expr.tri", "surface", head, 0);
+
+	// No morph name comes from two sources on the same vertices: two exact sources only as windows on
+	// different vertices, and never an exact source and a mask. Masks sharing a name are the halves of one
+	// face (left and right), which the overlap rule keeps apart.
+	std::map<std::pair<std::string, std::string>, std::vector<const MorphSource*>> givers;
+	for (auto& s : m.morphSources)
+		if (s.outcome == "applied")
+			for (auto& n : s.morphs) givers[{s.shape, n}].push_back(&s);
+	for (auto& [key, list] : givers) {
+		bool clash = false;
+		for (size_t a = 0; a < list.size(); a++)
+			for (size_t b = 0; b < a; b++) {
+				const bool maskA = list[a]->mode == "surface", maskB = list[b]->mode == "surface";
+				if (maskA && maskB) continue;
+				clash |= maskA || maskB || list[a]->mode != "window" || list[b]->mode != "window" ||
+						 list[a]->windowStart == list[b]->windowStart;
+			}
+		CHECK(!clash, "'%s' given to '%s' by %zu sources", key.second.c_str(), key.first.c_str(), list.size());
+	}
 	size_t applied = 0, male = 0;
 	for (auto& s : m.morphSources) {
 		applied += s.outcome == "applied";
@@ -440,7 +513,7 @@ TEST(MorphSourceDecisions) {
 			CHECK(s.outcome != "applied", "male/other-head file applied: %s", s.file.c_str());
 		}
 	}
-	CHECK(applied == 6, "6 files applied, got %zu", applied);
+	CHECK(applied == 11, "11 files applied, got %zu", applied);
 	CHECK(male >= 9, "male files present in the sample set: %zu", male);
 }
 
@@ -481,7 +554,9 @@ TEST(IndexMorphsAreExact) {
 double SourceAsymmetryP90(const MergedModel& m, const std::string& morphName) {
 	std::vector<TriFile> masks;
 	for (auto& s : m.morphSources)
-		if (s.outcome == "applied" && s.mode == "surface") masks.push_back(ReadTri(s.file));
+		if (s.outcome == "applied" && s.mode == "surface" &&
+			std::find(s.morphs.begin(), s.morphs.end(), morphName) != s.morphs.end())
+			masks.push_back(ReadTri(s.file));
 	if (masks.size() != 2) return -1;
 	auto deltas = [&](const TriFile& t) -> const std::vector<Vec3>* {
 		for (auto& mo : t.morphs)
@@ -513,15 +588,12 @@ double SourceAsymmetryP90(const MergedModel& m, const std::string& morphName) {
 	return diff[diff.size() * 9 / 10];
 }
 
-TEST(SurfaceMorphTransfer) {
-	const MergedModel& m = MorphModel();
+// No frozen patches around the mouth: jaw-opening morphs must move the whole lower lip, including its
+// top and inner surfaces. A vertex is frozen when it moves less than a quarter as much as its busiest
+// neighbour. Region: the head around the mouth mesh (its bounding box grown by one unit).
+void CheckLipsNotFrozen(const MergedModel& m, const char* tag, const std::string& prefix = "") {
 	const int head = SlotByShader(m, 4);
 	const uint32_t first = m.materialVertices[head].first, count = m.materialVertices[head].second;
-	Vec3 headBone;
-	for (auto& b : m.bones)
-		if (b.name == "NPC Head [Head]") headBone = b.world.t;
-
-	// Neighbour lists of the head mesh (by position, so UV-seam copies count as one surface point).
 	std::vector<std::vector<uint32_t>> nbr(count);
 	for (size_t t = 0; t < m.tris.size(); t++) {
 		if (m.triMaterial[t] != head) continue;
@@ -529,6 +601,51 @@ TEST(SurfaceMorphTransfer) {
 			for (int b = 0; b < 3; b++)
 				if (a != b) nbr[m.tris[t][a] - first].push_back(m.tris[t][b] - first);
 	}
+	int mouthSlot = -1;
+	for (size_t i = 0; i < m.materials.size(); i++)
+		if (m.materials[i].shapeName.find("Mouth") != std::string::npos) mouthSlot = int(i);
+	CHECK(mouthSlot >= 0, "%s: mouth slot", tag);
+	if (mouthSlot < 0) return;
+	Vec3 lo{1e9, 1e9, 1e9}, hi{-1e9, -1e9, -1e9};
+	for (uint32_t i = 0; i < m.materialVertices[mouthSlot].second; i++) {
+		const Vec3& p = m.positions[m.materialVertices[mouthSlot].first + i];
+		lo = {std::fmin(lo.x, p.x), std::fmin(lo.y, p.y), std::fmin(lo.z, p.z)};
+		hi = {std::fmax(hi.x, p.x), std::fmax(hi.y, p.y), std::fmax(hi.z, p.z)};
+	}
+	lo = lo - Vec3(1, 1, 1);
+	hi = hi + Vec3(1, 1, 1);
+	for (const char* base : {"Aah", "BigAah", "Oh", "OohQ"}) {
+		const std::string full = prefix + base;
+		const char* name = full.c_str();
+		const BlendShape* b = FindBlendShape(m, name);
+		CHECK(b, "%s: %s exists", tag, name);
+		if (!b) continue;
+		std::vector<Vec3> d(count);
+		for (size_t i = 0; i < b->vertices.size(); i++)
+			if (SlotOfVertex(m, b->vertices[i]) == head) d[b->vertices[i] - first] = b->deltas[i];
+		int frozen = 0, region = 0;
+		for (uint32_t v = 0; v < count; v++) {
+			const Vec3& p = m.positions[first + v];
+			if (p.x < lo.x || p.y < lo.y || p.z < lo.z || p.x > hi.x || p.y > hi.y || p.z > hi.z) continue;
+			region++;
+			double busiest = 0;
+			for (uint32_t u : nbr[v]) busiest = std::fmax(busiest, d[u].length());
+			if (busiest >= 0.2 && d[v].length() < 0.25 * busiest) frozen++;
+		}
+		std::printf("    [lip] %s %s: %d frozen of %d head vertices around the mouth\n", tag, name, frozen, region);
+		CHECK(region > 200 && frozen * 50 <= region, "%s %s: %d frozen vertices around the mouth (of %d)", tag, name, frozen,
+			  region);
+	}
+}
+
+TEST(SurfaceMorphTransfer) {
+	const MergedModel& m = SurfaceModel();
+	const int head = SlotByShader(m, 4);
+	const uint32_t first = m.materialVertices[head].first, count = m.materialVertices[head].second;
+	Vec3 headBone;
+	for (auto& b : m.bones)
+		if (b.name == "NPC Head [Head]") headBone = b.world.t;
+
 	auto check = [&](const char* name, double sideSign, bool down, bool symmetric) {
 		const BlendShape* b = FindBlendShape(m, name);
 		CHECK(b, "%s exists", name);
@@ -607,10 +724,14 @@ TEST(SurfaceMorphTransfer) {
 			if (m.positions[first + v].y < headBone.y - 4) back = std::fmax(back, d[v].length());
 		CHECK(back < 1e-6, "%s moves the back of the head by %.3f", name, back);
 	};
-	check("BlinkLeft", -1, true, false); // Skyrim +X is the character's right
-	check("BlinkRight", +1, true, false);
-	check("Aah", 0, true, true);         // jaw opens downwards
-	check("MoodHappy", 0, false, true);
+	for (const std::string prefix : {"", "EXPR_"}) { // the game's masks, then EFA's, transferred separately
+		check((prefix + "BlinkLeft").c_str(), -1, true, false); // Skyrim +X is the character's right
+		check((prefix + "BlinkRight").c_str(), +1, true, false);
+		check((prefix + "Aah").c_str(), 0, true, true); // jaw opens downwards
+		check((prefix + "MoodHappy").c_str(), 0, false, true);
+		// The face masks do not describe the top and inside of the lower lip; it must still move.
+		CheckLipsNotFrozen(m, "masks", prefix);
+	}
 
 	const BlendShape* aah = FindBlendShape(m, "Aah");
 	if (aah) {
@@ -618,6 +739,137 @@ TEST(SurfaceMorphTransfer) {
 		for (size_t i = 0; i < aah->vertices.size(); i++) headMoved += SlotOfVertex(m, aah->vertices[i]) == head;
 		CHECK(headMoved > 200 && headMoved < count, "Aah transfers to part of the head, not all of it (%zu of %u)", headMoved, count);
 	}
+}
+
+// Two exact sources for the same mouth with different names both apply, each reproduced exactly.
+TEST(SourcesChosenPerMorphName) {
+	const MergedModel& m = MorphModel();
+	int mouth = -1;
+	for (size_t i = 0; i < m.materials.size(); i++)
+		if (m.materials[i].shapeName.find("Mouth") != std::string::npos) mouth = int(i);
+	CHECK(mouth >= 0, "mouth slot");
+	if (mouth < 0) return;
+	const uint32_t first = m.materialVertices[mouth].first, count = m.materialVertices[mouth].second;
+	for (const char* file : {"trifiles/MouthHumanF.tri", "trifiles/HPH/EFA/expr_mouthhumanf.tri"}) {
+		TriFile tri = ReadTri(Sample(file));
+		size_t compared = 0;
+		for (auto& morph : tri.morphs) {
+			const BlendShape* b = FindBlendShape(m, morph.name);
+			double peak = 0;
+			for (auto& d : morph.deltas) peak = std::fmax(peak, d.length());
+			if (peak < 1e-7) continue;
+			CHECK(b, "%s: %s is a blend shape", file, morph.name.c_str());
+			if (!b) continue;
+			std::vector<Vec3> got(count);
+			for (size_t i = 0; i < b->vertices.size(); i++)
+				if (SlotOfVertex(m, b->vertices[i]) == mouth) got[b->vertices[i] - first] = b->deltas[i];
+			double worst = 0;
+			for (uint32_t v = 0; v < count; v++) {
+				Vec3 want = m.materials[mouth].skinToRest * morph.deltas[v];
+				if (want.length() < 1e-7) want = Vec3();
+				worst = std::fmax(worst, (got[v] - want).length());
+			}
+			CHECK(worst < 1e-9, "%s: %s reproduced on the mouth (error %g)", file, morph.name.c_str(), worst);
+			compared++;
+		}
+		CHECK(compared >= 20, "%s: %zu morphs compared", file, compared);
+	}
+	// EXPR_Aah moves the face too, through EFA's masks, beside the game's Aah from femalehead.tri.
+	const BlendShape* expr = FindBlendShape(m, "EXPR_Aah");
+	size_t headMoved = 0;
+	if (expr)
+		for (uint32_t v : expr->vertices) headMoved += SlotOfVertex(m, v) == SlotByShader(m, 4);
+	CHECK(headMoved > 200, "EXPR_Aah moves %zu head vertices", headMoved);
+}
+
+// HPH/femalehead.tri has the sample head's own triangles but not its shape: the FaceGen head is sculpted
+// well beyond the distance limits. It is applied by index, exactly, as the game applies it.
+TEST(SculptedHeadMorphsByIndex) {
+	const MergedModel& m = MorphModel();
+	const int head = SlotByShader(m, 4);
+	const uint32_t first = m.materialVertices[head].first, count = m.materialVertices[head].second;
+	auto by = SourcesByFile(m);
+	auto it = by.find("hph/femalehead.tri");
+	CHECK(it != by.end(), "femalehead.tri reported");
+	if (it == by.end()) return;
+	const MorphSource& src = *it->second;
+	CHECK(src.sameTriangles, "femalehead.tri recognised by its triangles");
+	CHECK(src.median > 0.35, "the head is sculpted beyond the distance limits (median %.3f), so this exercises the triangle rule",
+		  src.median);
+
+	// The masks are still fitted, at the shared origin set by the mouth and brows only: their fits equal
+	// those of the mask-only set, unaffected by the sculpted head's own offset.
+	auto surface = SourcesByFile(SurfaceModel());
+	for (const char* key : {"hph/femaleheadmaskleftside.tri", "hph/femaleheadmaskrightside.tri"}) {
+		auto a = by.find(key), b = surface.find(key);
+		CHECK(a != by.end() && b != surface.end() && a->second->median == b->second->median &&
+				  a->second->max == b->second->max,
+			  "%s fits the same with and without femalehead.tri", key);
+	}
+
+	// Every morph reproduced exactly on every head vertex, and nothing else moves the head.
+	TriFile tri = ReadTri(src.file);
+	CHECK(tri.vertices.size() == count, "vertex counts %zu / %u", tri.vertices.size(), count);
+	const Mat3& rot = m.materials[head].skinToRest;
+	size_t compared = 0;
+	for (auto& morph : tri.morphs) {
+		double peak = 0;
+		for (auto& d : morph.deltas) peak = std::fmax(peak, d.length());
+		const BlendShape* b = FindBlendShape(m, morph.name);
+		if (peak < 1e-7) {
+			bool moves = false;
+			if (b)
+				for (size_t i = 0; i < b->vertices.size(); i++) moves |= SlotOfVertex(m, b->vertices[i]) == head;
+			CHECK(!moves, "%s moves nothing in the TRI but moves the head", morph.name.c_str());
+			continue;
+		}
+		CHECK(b, "%s is a blend shape", morph.name.c_str());
+		if (!b) continue;
+		std::vector<Vec3> got(count);
+		for (size_t i = 0; i < b->vertices.size(); i++)
+			if (SlotOfVertex(m, b->vertices[i]) == head) got[b->vertices[i] - first] = b->deltas[i];
+		double worst = 0;
+		for (uint32_t v = 0; v < count; v++) {
+			Vec3 want = rot * morph.deltas[v];
+			if (want.length() < 1e-7) want = Vec3();
+			worst = std::fmax(worst, (got[v] - want).length());
+		}
+		CHECK(worst < 1e-9, "%s reproduced on the head (error %g)", morph.name.c_str(), worst);
+		compared++;
+	}
+	CHECK(compared >= 40, "%zu head morphs compared", compared);
+	CHECK(!FindBlendShape(m, "CreatedByKouLeifoh"), "the TRI's empty marker morph is not a blend shape");
+	CheckLipsNotFrozen(m, "femalehead.tri");
+	CheckLipsNotFrozen(m, "EFA masks beside femalehead.tri", "EXPR_");
+
+	// The triangle rule needs the slot's triangles exactly: the same file with its first face's winding
+	// reversed is a different mesh, judged by distance alone, and rejected.
+	std::vector<char> bytes;
+	{
+		std::ifstream in(fs::u8path(src.file), std::ios::binary);
+		bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+	}
+	uint32_t numVerts = 0, numModVerts = 0;
+	std::memcpy(&numVerts, bytes.data() + 8, 4);
+	std::memcpy(&numModVerts, bytes.data() + 8 + 9 * 4, 4);
+	const size_t face0 = 64 + size_t(numVerts + numModVerts) * 12; // header, vertices, modifier vertices
+	std::swap_ranges(bytes.begin() + face0 + 4, bytes.begin() + face0 + 8, bytes.begin() + face0 + 8);
+	const std::string patched = Tmp("femalehead_reversed_face.tri");
+	{
+		std::ofstream out(fs::u8path(patched), std::ios::binary);
+		out.write(bytes.data(), std::streamsize(bytes.size()));
+	}
+	TriFile check = ReadTri(patched);
+	CHECK(check.triangles[0][1] == tri.triangles[0][2] && check.triangles[0][2] == tri.triangles[0][1],
+		  "patched file has the first face reversed");
+	MergedModel alt = MergeModel({Sample("skeleton_female.nif"), PairPartFiles(SampleParts()), 50,
+								  {Sample("trifiles/MouthHumanF.tri"), Sample("trifiles/HPH/femaleheadbrows.tri"), patched}},
+								 Quiet);
+	bool rejected = false;
+	for (auto& s : alt.morphSources)
+		if (fs::u8path(s.file).filename() == "femalehead_reversed_face.tri")
+			rejected = s.outcome.rfind("rejected:", 0) == 0 && !s.sameTriangles;
+	CHECK(rejected, "a head TRI with one face reversed is judged by distance and rejected");
 }
 
 TEST(BlendShapesRoundTripFbx) {

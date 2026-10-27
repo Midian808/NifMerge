@@ -252,52 +252,126 @@ positions turned into offsets), rejecting truncated or over-long files.
 - surface: a lower-resolution mask on the slot's surface.
 
 Acceptance limits (game units): median ≤ 0.35 and p90 ≤ 0.6 for all modes, plus max ≤ 1.2 (index,
-window) or ≤ 0.8 (surface). Priority is index > window > surface. Same-named files are alternatives:
-the stronger mode wins, then the denser mesh. Per slot there is one index source, windows do not
-overlap, a slot with an exact source takes no surface mask, and overlapping masks keep the better
-fit.
+window) or ≤ 0.8 (surface). An index fit whose triangle list is the slot's own, index for index, is
+accepted at any distance: identical faces prove the vertex order, and a sculpted FaceGen head keeps
+its base mesh's topology while moving its vertices well away from the base shape (the user's head
+sits a median 0.42, max 0.92, from the High Poly Head's `femalehead.tri`, and fails the distance
+limits). Priority is index > window > surface.
+
+**Choosing sources.** Same-named files in different folders are alternatives for one part: the
+stronger mode wins, then the denser mesh. Files named `*chargen.tri` (character-creation sliders,
+already baked into a FaceGen head) are skipped. Everything else is decided **per morph name**, so
+files giving one part different names all apply. The case is an animation mod (EFA), whose `EXPR_`
+files for the mouth, eyes, brows and face masks sit beside the game's own. Where two sources give the
+same name to the same vertices, one keeps it:
+- between exact sources (index, window) on overlapping vertices: the one with the slot's own
+  triangles, then the stronger mode, then the closer fit;
+- a mask gives no name that an exact source of its slot gives;
+- two masks covering mostly the same area: the better fit.
+
+A file left with no names is not applied, with the reason of the first source that took them. Morphs
+that move nothing (`femalehead.tri`'s `CreatedByKouLeifoh` marker) give no name. Masks sharing names
+are transferred together as one set (the left and right halves of a face: a half without a name does
+not move for it); sets with different names are transferred separately, since a mask says nothing
+about names it does not carry. The sidecar's `morphSources` lists each applied file's names and
+whether it matched by its triangles (`sameTriangles`).
 
 **One TRI space per head.** All of a head's TRIs share one origin, the median offset of the exact
-matches. Surface masks are placed there rather than fitting their own offset: a free fit slides a
-mask along the curved face until even another head's mask passes. Measured: the male masks fitted
-freely reached median 0.11; at the shared origin they score 0.46–0.49 and are rejected. Only when no
-TRI matches exactly is a mask's offset fitted (with a warning).
+matches within the distance limits. A match accepted only for its triangles does not count: its
+offset includes the sculpt (0.25–0.3 from the shared origin for `femalehead.tri`). Surface masks are
+placed at the origin rather than fitting their own offset: a free fit slides a mask along the curved
+face until even another head's mask passes. Measured: the male masks fitted freely reached median
+0.11; at the shared origin they are rejected. Only when no TRI matches within the limits is a mask's
+offset fitted (with a warning).
 
-Decisions on the user's set (`samples/trifiles`, origin (0.00, −2.03, 120.17)):
+Decisions on the user's set (`samples/trifiles`, origin (0.00, −2.11, 120.17)):
 
-| File | Slot | Mode | median / p90 / max |
-|---|---|---|---|
-| `MouthHumanF.tri` | mouth | index | 0.228 / 0.486 / 0.984 |
-| `EyesFemaleLeft.tri` | eyes 0–87 | window | 0.106 / 0.374 / 0.893 |
-| `EyesFemaleRight.tri` | eyes 88–175 | window | 0.105 / 0.376 / 0.897 |
-| `HPH/femaleheadbrows.tri` | brows | index | 0.244 / 0.338 / 0.425 |
-| `HPH/femaleheadmaskleftside.tri` | head | surface | 0.191 / 0.472 / 0.573 |
-| `HPH/femaleheadmaskrightside.tri` | head | surface | 0.171 / 0.464 / 0.577 |
+| File | Slot | Mode | median / p90 / max | Outcome |
+|---|---|---|---|---|
+| `MouthHumanF.tri` | mouth | index | 0.228 / 0.486 / 0.984 | applied, 21 morphs |
+| `EyesFemaleLeft.tri` | eyes 0–87 | window | 0.106 / 0.374 / 0.893 | applied, 22 morphs |
+| `EyesFemaleRight.tri` | eyes 88–175 | window | 0.105 / 0.376 / 0.897 | applied, 22 morphs |
+| `HPH/femaleheadbrows.tri` | brows | index | 0.244 / 0.338 / 0.425 | applied, 44 morphs |
+| `HPH/femalehead.tri` | head | index (same triangles) | 0.420 / 0.557 / 0.918 | applied, 44 morphs |
+| `HPH/femaleheadmask{left,right}side.tri` | head | surface | 0.151 / 0.438 / 0.560, 0.150 / 0.434 / 0.551 | skipped: `femalehead.tri` gives every name |
+| `HPH/*chargen.tri` | | | | skipped: character creation |
+| `EFA/expr_mouthhumanf.tri` | mouth | index | 0.228 / 0.486 / 0.984 | applied, 21 `EXPR_` morphs |
+| `EFA/expr_eyesfemale{left,right}.tri` | eyes | window | as the game's eyes | applied, 22 `EXPR_` morphs each |
+| `EFA/femaleheadbrows_expr.tri` | brows | index | 0.161 / 0.244 / 0.296 | applied, 29 `EXPR_` morphs |
+| `EFA/femaleheadmask{left,right}side_expr.tri` | head | surface | 0.067 / 0.196 / 0.372, 0.071 / 0.203 / 0.415 | applied, 37 `EXPR_` morphs each |
+| `EFA/expr_femaleheadmask*.tri` (vanilla head) | head | surface | 0.079 / 0.216 / 0.324, 0.078 / 0.203 / 0.374 | superseded by the closer HPH `_expr` masks |
+| `EFA/expr_femaleheadbrows.tri` (vanilla brows) | brows | surface | 0.067 / 0.147 / 0.331 | skipped: the brows' exact `EXPR_` source |
 
-The vanilla `FemaleHead*` files are superseded by their HPH namesakes. All male files and the male
-mouth are rejected; the vanilla `MaleHeadbrows.tri` misses the median limit by only 0.002 and would in
-any case lose to the brows' exact source. Result: 47 blend shapes.
+The vanilla `FemaleHead*` files are superseded by their HPH namesakes. The male files and the male
+mouth are rejected, except the brows: the HPH `maleheadbrows.tri` fits the female brows within the
+limits (median 0.332) but gives no name, since the brows' exact source gives them all. Result: 93
+blend shapes, 47 of the game's names and 46 `EXPR_` ones.
 
-**Surface transfer.** Each slot vertex takes the motion of the nearest mask point, preferring a
-same-facing mask triangle when it is within 0.3 of the nearest overall. Each mask's winding is
-detected from the data. Full strength applies within 1.0 of the mask, fading to zero at 1.5. Where
-closed lips nearly touch, a vertex therefore follows its own lip. At closed mouth corners 3D proximity
-cannot always decide: 2 of 500 mirrored vertex pairs disagree on `Aah`. Two alternatives were measured
-and rejected: UV transfer (the HPH masks have their own UV layout; no UV coincides with the head's)
-and filling ambiguous vertices from mesh neighbours (7 pairs, worse). The HPH chargen `.tri` holds the
-unshaped head the masks were authored on and could resolve the corners; the user did not supply it.
+**Surface transfer.** The masks cover the face's skin but not every surface of the head: the top and
+inside of the lower lip are missing. Those head vertices lie 0.3–0.95 from every mask point, and the
+nearest one is on the upper lip, which barely moves when the jaw opens. A nearest-point-only transfer
+therefore left 47 / 51 / 13 head vertices around the mouth frozen on `Aah` / `BigAah` / `Oh` (the
+static band the user saw). The transfer is now:
+
+- **Direct match.** A vertex takes the mask's motion at its nearest point only when that point is
+  within 0.25 and on a mask surface **facing the same way** (normals within ~45°, cosine 0.7; each
+  mask's winding is detected from the data). A vertex whose nearest point lies on a different part of
+  the mask than its neighbours' points (more than 3 triangle rings away across the mask) is not a
+  direct match either.
+- **Smoothing.** Every other vertex within 3.0 of a mask is smoothed over the head's own mesh, with
+  direct matches fixed: each becomes (Σ neighbours + pull × target) / (neighbour count + pull).
+  - Same-facing nearest points within 1.5 are pulled towards with weight 2. Their target fades from
+    full strength at 1.0 to zero at 1.5, and beyond 1.5 the target is zero.
+  - Vertices with no same-facing surface near (the lower lip's top and inside) are not pulled, and
+    simply follow the surface they are attached to.
+  - UV-seam copies count as neighbours.
+
+Measured choices. The trust distance 0.25 left the fewest frozen lip vertices; 0.30 doubled them. Pure
+smoothing (no pull) collapsed the inside of the lips, which touches well-fitting skin at a single
+vertex, into one motion (33 / 74 left/right disagreements on `Aah` / `MoodHappy`). Pull 2 balanced
+that; pull 4 froze the lip again. A same-facing cosine of 0.34 still let the lower lip's top edge
+match the upper lip; 0.7 freed it, and 0.8 behaved the same. Three alternatives were measured and
+rejected:
+- anchoring to the mouth mesh: it is static where it touches the lips;
+- UV transfer: the HPH masks have their own UV layout, and no UV coincides with the head's;
+- reshaping the masks with the HPH chargen sliders fitted to this head
+  (`femaleheadmask*sidechargen.tri`): the fit tightens (median 0.179 → 0.127, p90 0.469 → 0.333), but
+  the masks still have no lower-lip top or inside.
+
+Result on the user's set with the masks carrying the head (`femalehead.tri` left out): **0 frozen head
+vertices around the mouth** on `Aah`, `BigAah`, `Oh` and `OohQ`, and on their `EXPR_` counterparts
+from EFA's masks. Left/right disagreements over 30% of peak: 2 of 421 pairs on `Aah`, 3 of 691 on
+`MoodHappy`, 3 of 469 on `EXPR_Aah` and 8 of 834 on `EXPR_MoodHappy`. `MoodHappy`'s p90 is 0.062,
+below its source masks' own 0.087. With `femalehead.tri` the head takes the game's names exactly, by
+index, and the transfer serves only EFA's `EXPR_` masks.
 
 **FBX.** One `FbxBlendShape` with a channel per morph name. Shapes are written in full (one position
 per mesh vertex): the SDK's sparse-index form lost most offsets on read-back. Offsets below about a
 micrometre are zeroed by the SDK.
 
+**Unity import: positions only.** The importer imports the blend shapes with no blend-shape normals
+(`importBlendShapeNormals = None`). That is how Skyrim morphs work: a FaceGen head's per-frame data
+is positions, its normals stay static, and skin lighting comes from the model-space normal map, which
+the bake reproduces exactly when the vertex frames do not turn. Calculated blend-shape normals would
+turn the lighting with the deformation, which the game does not do. They also make Unity split head
+vertices (3,832 → 3,919), changing the frames the normal-map bake was made for: the head's seam check
+failed with them (median 9.29° against the source's 7.72°) and passes without them.
+
 **Checks.**
-- Core: TRI decoding; the decisions above; the left eye's `BlinkLeft` reproduced exactly with the
-  right eye still; blinks peaking on the correct side and moving down; `Aah` opening downwards.
-- Core, surface transfer: left/right consistency of `Aah` and `MoodHappy` measured against the source
-  masks' own asymmetry (`Aah` p90 1.4% vs 0.6% in the source, `MoodHappy` 11.3% vs 8.7%); mouth-corner
-  disagreements ≤ 1% of pairs; the back of the head untouched; full-shape FBX round trip within 2 µm.
-- Unity: all 47 imported by name, zero weights leave the mesh at rest, blink side and direction,
+- Core: TRI decoding; the decisions above; no name given twice to the same vertices; the left eye's
+  `BlinkLeft` reproduced exactly with the right eye still; blinks peaking on the correct side and
+  moving down; `Aah` opening downwards.
+- Core, per-name sources: `MouthHumanF.tri` and EFA's `expr_mouthhumanf.tri` both reproduced exactly
+  on the one mouth; `EXPR_Aah` moving the face through EFA's masks beside `femalehead.tri`.
+- Core, identical triangles: every morph of `femalehead.tri` reproduced exactly on every head vertex;
+  the empty marker morph not a blend shape; the masks' fits unchanged by its offset; the same file
+  with one face reversed judged by distance and rejected.
+- Core, surface transfer (the set without `femalehead.tri`, so both the game's and EFA's masks carry
+  the head): left/right consistency of `Aah` and `MoodHappy` and their `EXPR_` counterparts measured against the source
+  masks' own asymmetry (p90 within 0.05 of the source's, disagreements over 30% of peak ≤ 1% of
+  pairs); no frozen vertices around the mouth on `Aah`, `BigAah`, `Oh` and `OohQ` (≤ 2% of the head
+  vertices there); the back of the head untouched; full-shape FBX round trip within 2 µm.
+- Unity: all 93 imported by name, zero weights leave the mesh at rest, blink side and direction,
   `Aah` below the eyes and moving down, every morph confined to head parts, face renders.
 
 ## 5. Open questions (asked one at a time)

@@ -10,7 +10,7 @@ namespace NifMerge
     public class NifMergeImporter : AssetPostprocessor
     {
         const string StampPrefix = "nifmerge:";
-        const string ImporterVersion = "3";
+        const string ImporterVersion = "4";
 
         static void OnPostprocessAllAssets(string[] imported, string[] deleted, string[] moved, string[] movedFrom)
         {
@@ -99,9 +99,13 @@ namespace NifMerge
             importer.globalScale = 1f;
             importer.importNormals = ModelImporterNormals.Import;
             importer.importTangents = ModelImporterTangents.CalculateMikk;
-            // Facial morphs from .tri files arrive as blend shapes; Unity derives their normals.
+            // Facial morphs from .tri files arrive as blend shapes. They move positions only, as in Skyrim
+            // (a FaceGen head's per-frame data is positions; its normals stay put and skin lighting comes
+            // from the model-space normal map), so no blend-shape normals: the baked normal map then
+            // reproduces the game's normals mid-expression too. Calculated blend-shape normals would also
+            // make Unity split vertices, changing the frames the normal-map bake was made for.
             importer.importBlendShapes = true;
-            importer.importBlendShapeNormals = ModelImporterNormals.Calculate;
+            importer.importBlendShapeNormals = ModelImporterNormals.None;
             importer.importAnimation = false;
             importer.optimizeGameObjects = false;
 

@@ -94,7 +94,10 @@ void WriteMaterialsJson(const MergedModel& m, const std::string& fbxPath, const 
 		const MorphSource& s = m.morphSources[i];
 		o << "    {\"file\": " << Quote(fs::u8path(s.file).filename().u8string()) << ", \"shape\": " << Quote(s.shape)
 		  << ", \"mode\": " << Quote(s.mode) << ", \"windowStart\": " << s.windowStart << ", \"median\": " << Num(s.median)
-		  << ", \"p90\": " << Num(s.p90) << ", \"max\": " << Num(s.max) << ", \"outcome\": " << Quote(s.outcome) << "}"
+		  << ", \"p90\": " << Num(s.p90) << ", \"max\": " << Num(s.max)
+		  << ", \"sameTriangles\": " << (s.sameTriangles ? "true" : "false") << ", \"morphs\": [";
+		for (size_t k = 0; k < s.morphs.size(); k++) o << (k ? ", " : "") << Quote(s.morphs[k]);
+		o << "], \"outcome\": " << Quote(s.outcome) << "}"
 		  << (i + 1 < m.morphSources.size() ? ",\n" : "\n");
 	}
 	o << "  ],\n";
