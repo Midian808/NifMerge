@@ -88,12 +88,18 @@ struct PartInput {
 	std::optional<std::string> path1; // the _1 file of a weight pair
 };
 
+// How Unity rigs the model: Humanoid (an avatar mapped onto HumanoidMap) or Generic (bones by path).
+enum class Rig { Humanoid, Generic };
+inline const char* RigName(Rig r) { return r == Rig::Humanoid ? "humanoid" : "generic"; }
+
 struct MergeRequest {
 	std::string skeletonPath;
 	std::vector<PartInput> parts;        // the character: body, hands, feet, head
 	double weight = 50.0;               // Skyrim NPC weight, 0..100
 	std::vector<std::string> morphPaths; // .tri files or folders of them (searched recursively)
 	std::vector<PartInput> outfit;       // items worn; each replaces the character's triangles in the body slots it takes
+	Rig rig = Rig::Humanoid;             // Humanoid requires every required HumanoidMap bone
+	std::vector<std::string> keepBones;  // skeleton bones kept (with their ancestors) even when nothing is weighted to them
 };
 
 struct OutBone {
@@ -140,6 +146,8 @@ struct PartReport {
 };
 
 struct MergedModel {
+	std::string generator = "NifMerge"; // the tool that made it, recorded in the sidecar
+	Rig rig = Rig::Humanoid;
 	std::vector<OutBone> bones; // parents precede children
 	std::vector<MaterialSlot> materials;
 	std::vector<Vec3> positions;

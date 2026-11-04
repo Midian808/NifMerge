@@ -12,6 +12,7 @@ struct AnimExportInfo {
 	std::string skeletonHkx;
 	const HkxClip* clip = nullptr;
 	const ClipBinding* binding = nullptr;
+	std::string rig = "either"; // Unity rig for the clip: "humanoid", "generic", or "either" (the project setting decides)
 };
 
 void WriteAnimFbx(const PosedClip& posed, const AnimExportInfo& info, const std::string& fbxPath);

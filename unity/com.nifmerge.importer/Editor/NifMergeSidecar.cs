@@ -4,13 +4,14 @@ using UnityEngine;
 
 namespace NifMerge
 {
-    // Mirror of the <model>.materials.json sidecar written by NifMerge (formatVersion 2).
+    // Mirror of the <model>.materials.json sidecar written by NifMerge and SkyCreature (formatVersion 3).
     [Serializable]
     public class Sidecar
     {
-        public string generator;
+        public string generator;   // "NifMerge" (a character) or "SkyCreature" (a creature)
         public int formatVersion;
         public string fbx;
+        public string rig;         // "humanoid" or "generic"
         public float metresPerGameUnit;
         public HumanoidEntry[] humanoid;
         public string[] blendShapes; // facial morph names, as imported onto the mesh
@@ -18,7 +19,10 @@ namespace NifMerge
         public MaterialEntry[] materials;
 
         public const string Generator = "NifMerge";
-        public const int FormatVersion = 2;
+        public const string CreatureGenerator = "SkyCreature";
+        public const int FormatVersion = 3;
+
+        public bool IsHumanoid => rig != "generic";
 
         public static string PathFor(string fbxPath)
         {
@@ -34,11 +38,11 @@ namespace NifMerge
             if (!File.Exists(path)) return null;
             text = File.ReadAllText(path);
             var s = JsonUtility.FromJson<Sidecar>(text);
-            if (s == null || s.generator != Generator) return null;
+            if (s == null || (s.generator != Generator && s.generator != CreatureGenerator)) return null;
             if (s.formatVersion != FormatVersion)
             {
                 Debug.LogError($"NifMerge: {path} has formatVersion {s.formatVersion}; this importer reads version " +
-                               $"{FormatVersion}. Re-export the model with the matching NifMerge.");
+                               $"{FormatVersion}. Re-export the model with the matching {s.generator}.");
                 return null;
             }
             return s;

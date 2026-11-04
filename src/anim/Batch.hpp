@@ -14,6 +14,9 @@ struct BatchRequest {
 	std::string skeletonNif;         // override; empty: taken from the inputs
 	std::string skeletonHkx;         // override; empty: taken from the inputs, else beside the .nif
 	std::string outDir;
+	// Unity rig recorded in every clip's sidecar. Auto: "either" (the project setting decides) when the
+	// skeleton maps onto a Unity Humanoid, else "generic". Humanoid fails on a skeleton that does not map.
+	enum class Rig { Auto, Humanoid, Generic } rig = Rig::Auto;
 };
 
 struct BatchInputs {

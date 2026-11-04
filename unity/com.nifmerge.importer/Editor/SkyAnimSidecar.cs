@@ -4,7 +4,7 @@ using UnityEngine;
 
 namespace NifMerge
 {
-    // Mirror of the <clip>.anim.json sidecar written by SkyAnim (formatVersion 2).
+    // Mirror of the <clip>.anim.json sidecar written by SkyAnim and SkyCreature (formatVersion 3).
     [Serializable]
     public class AnimSidecar
     {
@@ -12,13 +12,17 @@ namespace NifMerge
         public int formatVersion;
         public string fbx;
         public string clip;        // clip name
+        public string rig;         // "humanoid", "generic", or "either" (the project setting decides)
         public string source;      // the .hkx it came from
         public string platform;    // "LE" or "SE"
         public int frames;
         public float fps;
         public float duration;     // seconds
         public bool loop;
-        public bool rootMotion;    // always false: clips play in place
+        public bool rootMotion;    // the clip moves the actor; the FBX's top-level bones carry the motion
+        public RestEntry[] motion; // when rootMotion: the actor's motion per frame, model space, FBX axes
+        public int drivenBones;    // Havok bones the clip animates
+        public int skeletonBones;  // bones in the Havok skeleton
         public AnimEventEntry[] events;
         public string binding;     // "by name", "by index" or "explicit"
         public string[] droppedTracks;
@@ -27,7 +31,7 @@ namespace NifMerge
         public RestEntry[] rest;   // every bone's rest transform relative to its parent, FBX space
 
         public const string Generator = "SkyAnim";
-        public const int FormatVersion = 2;
+        public const int FormatVersion = 3;
 
         public static string PathFor(string fbxPath)
         {

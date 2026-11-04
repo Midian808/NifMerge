@@ -134,9 +134,10 @@ void WriteAnimJson(const PosedClip& posed, const AnimExportInfo& info, const std
 	std::ostringstream o;
 	o << "{\n";
 	o << "  \"generator\": \"SkyAnim\",\n";
-	o << "  \"formatVersion\": 2,\n";
+	o << "  \"formatVersion\": 3,\n";
 	o << "  \"fbx\": " << JsonQuote(fs::u8path(fbxPath).filename().u8string()) << ",\n";
 	o << "  \"clip\": " << JsonQuote(info.clipName) << ",\n";
+	o << "  \"rig\": " << JsonQuote(info.rig) << ",\n";
 	o << "  \"source\": " << JsonQuote(info.sourceClip) << ",\n";
 	o << "  \"platform\": " << JsonQuote(clip.pointerSize == 8 ? "SE" : "LE") << ",\n";
 	o << "  \"skeletonNif\": " << JsonQuote(info.skeletonNif) << ",\n";
@@ -146,7 +147,19 @@ void WriteAnimJson(const PosedClip& posed, const AnimExportInfo& info, const std
 	o << "  \"duration\": " << JsonNum((posed.frames.size() - 1) * posed.frameDuration) << ",\n";
 	o << "  \"loop\": " << (posed.loops ? "true" : "false") << ",\n";
 	o << "  \"loopErrorDegrees\": " << JsonNum(posed.loopError) << ",\n";
-	o << "  \"rootMotion\": false,\n";
+	o << "  \"rootMotion\": " << (posed.rootMotion ? "true" : "false") << ",\n";
+	// The actor's motion per frame, FBX space (translation in metres, rotation as a quaternion), which the
+	// frames already include: the Unity package turns it into the clip's root motion.
+	o << "  \"motion\": [";
+	for (size_t f = 0; f < posed.motion.size(); f++) {
+		const Xform m = ToFbxXform(posed.motion[f]);
+		const Quat q = Quat::fromMat3(m.L);
+		o << (f ? ",\n" : "\n") << "    {\"t\": [" << JsonNum(m.t.x) << ", " << JsonNum(m.t.y) << ", " << JsonNum(m.t.z) << "], \"r\": ["
+		  << JsonNum(q.x) << ", " << JsonNum(q.y) << ", " << JsonNum(q.z) << ", " << JsonNum(q.w) << "]}";
+	}
+	o << (posed.motion.empty() ? "],\n" : "\n  ],\n");
+	o << "  \"drivenBones\": " << posed.drivenBones << ",\n";
+	o << "  \"skeletonBones\": " << posed.skeletonBones << ",\n";
 	o << "  \"events\": [";
 	bool first = true;
 	for (auto& e : clip.events) {

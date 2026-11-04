@@ -5,13 +5,13 @@ using UnityEngine;
 
 namespace NifMerge
 {
-    // Finds NifMerge FBX files (an FBX with a NifMerge .materials.json beside it) and configures them:
-    // Humanoid avatar with a T-pose reference, and one material per slot (NifMergeMaterials) remapped onto
-    // the model.
+    // Finds NifMerge and SkyCreature FBX files (an FBX with their .materials.json beside it) and configures
+    // them: a Humanoid avatar with a T-pose reference (or, for a creature without a Humanoid skeleton, a
+    // Generic avatar), and one material per slot (NifMergeMaterials) remapped onto the model.
     public class NifMergeImporter : AssetPostprocessor
     {
         const string StampPrefix = "nifmerge:";
-        const string ImporterVersion = "5";
+        const string ImporterVersion = "6";
 
         static void OnPostprocessAllAssets(string[] imported, string[] deleted, string[] moved, string[] movedFrom)
         {
@@ -110,8 +110,16 @@ namespace NifMerge
             importer.importAnimation = false;
             importer.optimizeGameObjects = false;
 
-            importer.humanDescription = NifMergeHumanoid.Build(fbxPath, sidecar, warnings);
-            importer.animationType = ModelImporterAnimationType.Human;
+            if (sidecar.IsHumanoid)
+            {
+                importer.humanDescription = NifMergeHumanoid.Build(fbxPath, sidecar, warnings);
+                importer.animationType = ModelImporterAnimationType.Human;
+            }
+            else
+            {
+                // A creature without a Humanoid skeleton: its clips bind to its bones by path.
+                importer.animationType = ModelImporterAnimationType.Generic;
+            }
             importer.avatarSetup = ModelImporterAvatarSetup.CreateFromThisModel;
             importer.userData = stamp;
             importer.SaveAndReimport();

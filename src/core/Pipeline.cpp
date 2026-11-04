@@ -11,9 +11,11 @@ RunResult RunPipeline(const RunOptions& opt, const LogFn& log) {
 	if (opt.fbxPath.empty()) throw Error("No output file selected");
 	namespace fs = std::filesystem;
 	fs::path out = fs::u8path(opt.fbxPath);
-	if (out.has_parent_path() && !fs::exists(out.parent_path())) fs::create_directories(out.parent_path());
 
+	// The merge first: a model that cannot be made leaves nothing behind, not even its folder.
 	MergedModel m = MergeModel(opt.request, log);
+	m.generator = opt.generator;
+	if (out.has_parent_path() && !fs::exists(out.parent_path())) fs::create_directories(out.parent_path());
 	WriteFbx(m, opt.fbxPath, log);
 	RunResult r;
 	r.fbxPath = opt.fbxPath;

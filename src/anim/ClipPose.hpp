@@ -28,13 +28,20 @@ struct PosedClip {
 	std::vector<bool> driven;                // per output bone: posed from the Havok skeleton
 	std::vector<std::vector<Xform>> frames;  // [frame][bone] rigid world transforms, game units, Skyrim axes
 	double frameDuration = 0;
-	bool loops = false;                      // first and last frames agree on every Humanoid bone
-	double loopError = 0;                    // largest first/last rotation difference there, degrees
+	bool loops = false;                      // on every driven bone, last -> first is no bigger than a frame step (or 0.5 degrees)
+	double loopError = 0;                    // largest first/last rotation difference over the driven bones, degrees
+	bool rootMotion = false;                 // the clip's reference frame moves, and the frames include it
+	std::vector<Xform> motion;               // when rootMotion: the actor's motion per frame (game units, Skyrim axes)
+	int drivenBones = 0;                     // Havok bones the clip has a track for
+	std::vector<std::string> missingNodes;   // driven Havok bones the NIF has no node for (not exported)
+	int skeletonBones = 0;                   // bones in the Havok skeleton
 };
 
 // Output bones are the NIF nodes driven by a Havok bone, every Humanoid bone, and all their ancestors
 // below the NIF file root (NifMerge's rule, so bone paths match its characters). Animated scale is
 // ignored; each NIF node keeps its own scale, which is then baked out like NifMerge's rest pose.
+// A moving reference frame (root motion) is composed over the whole pose: the game moves the whole actor
+// by it, and the bones are relative to it.
 PosedClip PoseClip(const HkxClip& clip, const ClipBinding& binding, const HkxSkeleton& hkx, const Skeleton& nif);
 
 } // namespace nm

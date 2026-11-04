@@ -3,6 +3,7 @@
 // clips, decoded to per-frame, per-track transforms.
 #include "HkxPackfile.hpp"
 
+#include <array>
 #include <set>
 
 namespace nm {
@@ -47,6 +48,8 @@ struct HkxClip {
 	int blendHint = 0;                                  // 0 normal, 1 additive
 	bool hasReferenceFrame = false;                     // extracted motion present
 	bool referenceFrameMoves = false;                   // and not all zero
+	Vec3 referenceUp{0, 0, 1};                          // the reference frame's up axis
+	std::vector<std::array<float, 4>> referenceSamples; // per sample: translation x, y, z (game units), yaw about up (radians)
 	std::set<std::string> formats;                      // encodings met, e.g. "rotation THREECOMP48"
 	std::set<std::string> unverifiedFormats;            // the subset no real sample has confirmed
 	std::vector<std::vector<HkTransform>> frames;       // [frame][track]

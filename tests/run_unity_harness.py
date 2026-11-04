@@ -1,4 +1,4 @@
-"""Unity batch-mode verification of NifMerge and SkyAnim output (milestones M3 and A5).
+"""Unity batch-mode verification of NifMerge, SkyAnim and SkyCreature output (milestones M3, A5 and C2).
 
 For each Unity editor given, this:
   1. creates (once) a scratch Built-in pipeline project under .tmp/unity/<version>,
@@ -7,6 +7,8 @@ For each Unity editor given, this:
      wearing the sample outfit (dress, boots, thong) into Assets/NifMergeTest/Outfit.fbx,
   4. runs SkyAnim.exe on the sample clips into Assets/NifMergeTest/Anim (plus Generic copies),
   5. writes small DDS test textures at some of the paths the sidecar references,
+  5b. runs SkyCreature.exe on the four sample creatures into Assets/NifMergeTest/Creatures/<name>, with
+     their real textures,
   6. opens the project in batch mode (the automatic import path a user hits) and runs
      NifMergeHarness.Run, which checks the imported result and renders two screenshots.
 
@@ -26,7 +28,16 @@ ROOT = Path(__file__).resolve().parent.parent
 BUILD = Path(os.environ.get("NIFMERGE_BUILD", ROOT / "build"))  # build tree to test
 NIFMERGE = BUILD / "Release" / "NifMerge.exe"
 SKYANIM = BUILD / "Release" / "SkyAnim.exe"
+SKYCREATURE = BUILD / "Release" / "SkyCreature.exe"
 SAMPLES = ROOT / "samples"
+# Creature folder under samples/Creatures, its model parts, its clip folder. Must match Creatures in
+# tests/unity/NifMergeHarness.cs.
+CREATURES = [
+    ("Wolf", ["wolf.nif"], "anims"),
+    ("Horse", ["horse.nif", "horsemane.nif", "saddle.nif"], "animations"),
+    ("Dragon", ["dragon.nif"], "anims"),
+    ("Draugr", ["draugrmale01.nif", "helmet01.nif"], "animation"),
+]
 ANIM = SAMPLES / "animationwork"
 DEFAULT_EDITORS = [
     r"D:\UnityHubFuckery\6000.0.68f1\Editor\Unity.exe",
@@ -103,7 +114,7 @@ def harness(unity: Path) -> bool:
     manifest_path.write_text(json.dumps(manifest, indent=2))
 
     assets = project / "Assets"
-    for d in ("NifMergeTest", "SkyrimTextures", "Editor"):
+    for d in ("NifMergeTest", "SkyrimTextures", "NifMergeTextureFixes", "Editor"):
         shutil.rmtree(assets / d, ignore_errors=True)
         meta = assets / (d + ".meta")
         if meta.exists():
@@ -128,17 +139,18 @@ def harness(unity: Path) -> bool:
             return False
 
     # SkyAnim clips for the same character skeleton: the SE walk, run and idle (nameless tracks, bound by
-    # index) and the LE bow release (named tracks, bound by name). Walk and bow also go to AnimGeneric,
-    # which the harness reconfigures as Generic to check exact playback on the character.
+    # index), the LE bow release (named tracks, bound by name) and a mod's running attack with root motion.
+    # Walk, bow and the attack also go to AnimGeneric, which the harness reconfigures as Generic to check exact
+    # playback on the character (and, for the attack, the in-place pose under its root motion).
     anim_dir, generic_dir = assets / "NifMergeTest" / "Anim", assets / "NifMergeTest" / "AnimGeneric"
     cmd = [SKYANIM, "export", "--skeleton", SAMPLES / "skeleton_female.nif", "--hkx", ANIM / "SSE" / "skeleton_female.hkx",
            ANIM / "SSE" / "mt_walkforward.hkx", ANIM / "SSE" / "mt_runforward.hkx", ANIM / "SSE" / "mt_idle.hkx",
-           ANIM / "LE" / "bow_release.hkx", "--out", anim_dir]
+           ANIM / "LE" / "bow_release.hkx", ANIM / "coverage" / "root_motion.hkx", "--out", anim_dir]
     if run(cmd) != 0:
         print(f"[{version}] SkyAnim failed")
         return False
     generic_dir.mkdir(parents=True)
-    for name in ("mt_walkforward", "bow_release"):
+    for name in ("mt_walkforward", "bow_release", "root_motion"):
         for ext in (".fbx", ".anim.json"):
             shutil.copy(anim_dir / (name + ext), generic_dir / (name + ext))
     (anim_dir / "batch_report.json").unlink()
@@ -170,6 +182,26 @@ def harness(unity: Path) -> bool:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy(src, dst)
 
+    # SkyCreature: the four sample creatures, models and clips, with their real textures (each creature's flat
+    # textures/ folder holds the files its NIFs name; they go where the sidecars' game paths point).
+    creatures = assets / "NifMergeTest" / "Creatures"
+    for name, parts, anims in CREATURES:
+        src = SAMPLES / "Creatures" / name
+        cmd = [SKYCREATURE, "export", src / "skeleton.nif"] + [src / p for p in parts] + [src / anims, "--out", creatures / name]
+        if run(cmd) != 0:
+            print(f"[{version}] SkyCreature failed on {name}")
+            return False
+        (creatures / name / "anims" / "batch_report.json").unlink()
+        have = {p.name.lower(): p for p in (src / "textures").glob("*.dds")}
+        side = next((creatures / name).glob("*.materials.json"))
+        for m in json.loads(side.read_text())["materials"]:
+            for t in m["textures"]:
+                found = have.get(Path(t.replace("\\", "/")).name.lower()) if t else None
+                if found:
+                    dst = tex / texture_rel(t)
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy(found, dst)
+
     log_path = work / "harness.log"
     env_cmd = [unity, "-batchmode", "-projectPath", project, "-executeMethod", "NifMergeHarness.Run",
                "-logFile", log_path]
@@ -189,7 +221,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--unity", action="append", help="Unity.exe to test with (repeatable)")
     args = ap.parse_args()
-    for exe in (NIFMERGE, SKYANIM):
+    for exe in (NIFMERGE, SKYANIM, SKYCREATURE):
         if not exe.exists():
             sys.exit(f"Build first: {exe} missing")
     editors = [Path(u) for u in (args.unity or DEFAULT_EDITORS)]

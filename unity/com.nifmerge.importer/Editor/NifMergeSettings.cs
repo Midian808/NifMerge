@@ -17,7 +17,8 @@ namespace NifMerge
         [Tooltip("How SkyAnim animation FBX files import. Humanoid: retargets onto any Humanoid character " +
                  "(non-human bones such as twist and physics bones follow when the character has them). " +
                  "Generic: exact playback on a Generic-rigged character (an Animator without a Humanoid avatar) " +
-                 "built from the same skeleton.")]
+                 "built from the same skeleton. Clips whose sidecar names a rig (SkyCreature's, or a skeleton " +
+                 "that cannot be Humanoid) import with that rig instead.")]
         public AnimationRig animationRig = AnimationRig.Humanoid;
 
         public void Save() => Save(true);

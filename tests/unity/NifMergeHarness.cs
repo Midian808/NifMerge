@@ -36,6 +36,8 @@ public static class NifMergeHarness
             RunChecks(outDir);
             CheckOutfit(outDir);
             CheckAnimations(outDir);
+            CheckHumanoidRootMotion();
+            CheckCreatures(outDir);
             code = failures == 0 ? 0 : 1;
         }
         catch (Exception e)
@@ -1013,6 +1015,277 @@ public static class NifMergeHarness
                 UnityEngine.Object.DestroyImmediate(anim);
             }
         }
+    }
+
+    // A human clip with root motion (a running backward attack, 26.9 game units back at its furthest), Humanoid on
+    // the NifMerge character through an Animator with a controller. The game's pose is the actor's motion (the
+    // sidecar's, per frame) composed over the in-place pose (its Generic copy sampled without root motion).
+    // Applying root motion must move the character and land the hips there, not twice as far.
+    static void CheckHumanoidRootMotion()
+    {
+        string fbx = AnimDir + "root_motion.fbx", generic = GenericDir + "root_motion.fbx";
+        var sc = AnimSidecar.TryLoad(fbx, out _);
+        var clip = ClipOf(fbx);
+        Check(sc != null && sc.rootMotion && clip != null && clip.humanMotion, "root_motion: Humanoid clip with root motion");
+        if (sc == null || clip == null) return;
+        var settings = AnimationUtility.GetAnimationClipSettings(clip);
+        Check(!settings.loopBlendPositionXZ && !settings.loopBlendPositionY && !settings.loopBlendOrientation,
+              "root_motion: root position and rotation not baked into the pose");
+
+        var genericSettings = NifMergeSettings.instance;
+        genericSettings.animationRig = NifMergeSettings.AnimationRig.Generic;
+        SkyAnimImporter.Configure(generic, false);
+        genericSettings.animationRig = NifMergeSettings.AnimationRig.Humanoid;
+        var genericClip = ClipOf(generic);
+
+        var ch = UnityEngine.Object.Instantiate(AssetDatabase.LoadAssetAtPath<GameObject>(Fbx));
+        string controllerPath = AnimDir + "HarnessRootMotion.controller";
+        try
+        {
+            var bones = ByName(ch);
+            var hips = bones["NPC COM [COM ]"];
+            var animator = ch.GetComponent<Animator>();
+            var avatar = animator.avatar;
+
+            // The in-place pose: the Generic copy (its motion moved into root-motion curves), no root motion applied.
+            var inPlace = new List<Vector3>();
+            animator.avatar = null;
+            using (var player = new ClipPlayer(ch, genericClip))
+                for (int f = 0; f < sc.frames; f++)
+                {
+                    player.Sample(f / sc.fps);
+                    inPlace.Add(hips.position);
+                }
+            animator.avatar = avatar;
+            animator.Rebind();
+
+            var controller = UnityEditor.Animations.AnimatorController.CreateAnimatorControllerAtPathWithClip(controllerPath, clip);
+            ch.transform.SetPositionAndRotation(Vector3.zero, Quaternion.identity);
+            animator.runtimeAnimatorController = controller;
+            animator.applyRootMotion = true;
+            animator.cullingMode = AnimatorCullingMode.AlwaysAnimate;
+            animator.Rebind();
+            animator.Update(0f);
+            float worst = 0f, furthest = 0f;
+            for (int f = 1; f < sc.frames; f++)
+            {
+                animator.Update(1f / sc.fps);
+                var m = sc.motion[f];
+                Vector3 want = Matrix4x4.TRS(m.UnityPosition, m.UnityRotation, Vector3.one).MultiplyPoint3x4(inPlace[f]);
+                worst = Mathf.Max(worst, (hips.position - want).magnitude);
+                furthest = Mathf.Max(furthest, ch.transform.position.magnitude);
+            }
+            Lines.Add($"INFO root_motion: character moved up to {furthest:0.000} m, ends at {ch.transform.position}; hips within {worst:0.000} m of the game's");
+            Check(furthest > 0.2f, $"root_motion: root motion moves the character ({furthest:0.000} m; the clip's motion reaches 0.384 m)");
+            Check(worst < 0.03f, $"root_motion: the hips follow the game's path, not twice the motion (worst {worst:0.000} m)");
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(ch);
+            AssetDatabase.DeleteAsset(controllerPath);
+        }
+    }
+
+    // ---- SkyCreature (Assets/NifMergeTest/Creatures/<name>: <model>.fbx + anims/). Must match CREATURES in
+    // tests/run_unity_harness.py.
+    const string CreatureDir = "Assets/NifMergeTest/Creatures/";
+    static readonly (string name, string model, bool humanoid)[] Creatures =
+    {
+        ("Wolf", "wolf", false), ("Horse", "horse", false), ("Dragon", "dragon", false), ("Draugr", "draugrmale01", true),
+    };
+
+    static void CheckCreatures(string outDir)
+    {
+        foreach (var (name, model, humanoid) in Creatures)
+        {
+            string fbx = CreatureDir + name + "/" + model + ".fbx";
+            var sidecar = Sidecar.TryLoad(fbx, out _);
+            var importer = AssetImporter.GetAtPath(fbx) as ModelImporter;
+            Check(sidecar != null && importer != null && sidecar.generator == Sidecar.CreatureGenerator, $"{name}: SkyCreature model and sidecar imported");
+            if (sidecar == null || importer == null) continue;
+            Check(importer.userData != null && importer.userData.StartsWith("nifmerge:"), $"{name}: model configured on import");
+            Check(sidecar.IsHumanoid == humanoid && importer.animationType ==
+                  (humanoid ? ModelImporterAnimationType.Human : ModelImporterAnimationType.Generic),
+                  $"{name}: imported as {importer.animationType} (sidecar rig {sidecar.rig})");
+            var avatar = AssetDatabase.LoadAllAssetsAtPath(fbx).OfType<Avatar>().FirstOrDefault();
+            Check(avatar != null && avatar.isValid && avatar.isHuman == humanoid, $"{name}: avatar valid, human {avatar?.isHuman}");
+
+            // Every slot gets its material, with the diffuse texture the NIF names.
+            var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(fbx);
+            var smr = prefab.GetComponentInChildren<SkinnedMeshRenderer>();
+            var mats = smr.sharedMaterials;
+            Check(mats.Length == sidecar.materials.Length, $"{name}: {mats.Length} materials for {sidecar.materials.Length} slots");
+            int textured = 0;
+            for (int i = 0; i < mats.Length && i < sidecar.materials.Length; i++)
+            {
+                string diffuse = sidecar.materials[i].textures.Length > 0 ? sidecar.materials[i].textures[0] : "";
+                bool ok = SameTexture(TexPath(mats[i], "_MainTex"), diffuse);
+                Check(ok, $"{name}: slot {sidecar.materials[i].name} diffuse '{diffuse}' assigned ({TexPath(mats[i], "_MainTex")})");
+                textured += ok ? 1 : 0;
+            }
+            // Skyrim's DDS files stop their mip chain early, which Unity refuses: the package uses a completed copy,
+            // the source's own size, with every level down to 1x1.
+            var diffuseTex = mats.Length > 0 ? mats[0].GetTexture("_MainTex") as Texture2D : null;
+            if (diffuseTex != null)
+            {
+                string at = AssetDatabase.GetAssetPath(diffuseTex);
+                int full = 1 + (int)Math.Floor(Math.Log(Math.Max(diffuseTex.width, diffuseTex.height), 2));
+                Check(at.StartsWith(NifMergeMaterials.RepairedDdsFolder + "/") && diffuseTex.mipmapCount == full,
+                      $"{name}: diffuse is the completed copy {at} ({diffuseTex.width}x{diffuseTex.height}, {diffuseTex.mipmapCount} of {full} mips)");
+            }
+
+            var go = UnityEngine.Object.Instantiate(prefab);
+            try
+            {
+                var bones = ByName(go);
+                RenderCreature(go, Path.Combine(outDir, $"creature_{name.ToLowerInvariant()}.png"));
+                CheckCreatureClips(name, go, bones, humanoid, outDir);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(go);
+            }
+        }
+    }
+
+    static void CheckCreatureClips(string name, GameObject go, Dictionary<string, Transform> bones, bool humanoid, string outDir)
+    {
+        var animator = go.GetComponent<Animator>();
+        foreach (string fbx in Directory.GetFiles(CreatureDir + name + "/anims", "*.fbx").Select(p => p.Replace('\\', '/')).OrderBy(p => p))
+        {
+            string clipName = Path.GetFileNameWithoutExtension(fbx);
+            var sc = AnimSidecar.TryLoad(fbx, out _);
+            var imp = AssetImporter.GetAtPath(fbx) as ModelImporter;
+            var clip = ClipOf(fbx);
+            Check(sc != null && imp != null && clip != null && imp.userData.StartsWith("skyanim:"), $"{name}/{clipName}: clip imported and configured");
+            if (sc == null || imp == null || clip == null) continue;
+            Check(imp.animationType == (humanoid ? ModelImporterAnimationType.Human : ModelImporterAnimationType.Generic) && clip.humanMotion == humanoid,
+                  $"{name}/{clipName}: {imp.animationType} like its model (sidecar rig {sc.rig})");
+            Check(AnimationUtility.GetAnimationClipSettings(clip).loopTime == sc.loop, $"{name}/{clipName}: loop time {sc.loop}");
+            Check(Mathf.Abs(clip.length - sc.duration) < 0.002f, $"{name}/{clipName}: length {clip.length} s (sidecar {sc.duration})");
+            Check(AnimationUtility.GetAnimationEvents(clip).Length == sc.events.Length, $"{name}/{clipName}: {sc.events.Length} events");
+
+            // Every transform curve binds on the creature (bone paths match the model's).
+            int bound = 0, missing = 0;
+            foreach (var b in AnimationUtility.GetCurveBindings(clip))
+            {
+                if (b.type != typeof(Transform)) continue;
+                if (go.transform.Find(b.path) != null) bound++;
+                else missing++;
+            }
+            if (!humanoid) Check(bound > 0 && missing == 0, $"{name}/{clipName}: {bound} curves bind on the creature, {missing} do not");
+            else Check(missing == 0, $"{name}/{clipName}: every non-muscle curve binds on the draugr ({bound}), {missing} do not");
+
+            if (sc.rootMotion) CheckRootMotion(name, clipName, go, bones, clip, sc, imp);
+            else if (!humanoid) CheckGenericPlayback(name, clipName, go, bones, clip, sc, fbx);
+            else CheckHumanoidCreaturePlayback(name, clipName, go, bones, clip, sc);
+        }
+        animator.Rebind();
+    }
+
+    // Played on the creature, every bone it shares with the clip's own skeleton lands where that skeleton has it,
+    // and an in-place clip keeps the creature where it stands.
+    static void CheckGenericPlayback(string name, string clipName, GameObject go, Dictionary<string, Transform> bones, AnimationClip clip,
+                                     AnimSidecar sc, string fbx)
+    {
+        var own = UnityEngine.Object.Instantiate(AssetDatabase.LoadAssetAtPath<GameObject>(fbx));
+        try
+        {
+            var ownBones = ByName(own);
+            float worst = 0f;
+            using (var onCreature = new ClipPlayer(go, clip))
+            using (var onOwn = new ClipPlayer(own, clip))
+                for (int f = 0; f < sc.frames; f += Math.Max(1, sc.frames / 10))
+                {
+                    onCreature.Sample(f / sc.fps);
+                    onOwn.Sample(f / sc.fps);
+                    foreach (var kv in ownBones)
+                        if (kv.Value != own.transform && bones.TryGetValue(kv.Key, out var c))
+                            worst = Mathf.Max(worst, (c.position - kv.Value.position).magnitude);
+                }
+            Check(worst < 1e-4f, $"{name}/{clipName}: playback on the creature matches the clip's skeleton (worst {worst:0.000000} m)");
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(own);
+        }
+        go.GetComponent<Animator>().Rebind();
+    }
+
+    // The draugr: Humanoid clips retargeted through its avatar keep it standing (head at its height).
+    static void CheckHumanoidCreaturePlayback(string name, string clipName, GameObject go, Dictionary<string, Transform> bones, AnimationClip clip,
+                                              AnimSidecar sc)
+    {
+        var head = go.GetComponent<Animator>().GetBoneTransform(HumanBodyBones.Head);
+        float restHead = head.position.y, low = float.MaxValue, high = float.MinValue;
+        using (var player = new ClipPlayer(go, clip))
+            for (int f = 0; f < sc.frames; f += Math.Max(1, sc.frames / 10))
+            {
+                player.Sample(f / sc.fps);
+                low = Mathf.Min(low, head.position.y);
+                high = Mathf.Max(high, head.position.y);
+            }
+        Check(low > restHead * 0.7f && high < restHead * 1.15f, $"{name}/{clipName}: head stays near its standing height {restHead:0.00} m ({low:0.00}..{high:0.00})");
+        go.GetComponent<Animator>().Rebind();
+    }
+
+    // The dragon's takeoff, played by an Animator with a controller (the runtime path). Its motion arrives as the
+    // clip's root-motion curves and its top-level bone's curves without it: applying root motion lifts the creature
+    // by the clip's 2048 game units (29.26 m) with the root bone staying at rest under it, and the body ends where
+    // the game has it (at the creature's height); without root motion the clip plays in place.
+    static void CheckRootMotion(string name, string clipName, GameObject go, Dictionary<string, Transform> bones, AnimationClip clip,
+                                AnimSidecar sc, ModelImporter imp)
+    {
+        var bindings = AnimationUtility.GetCurveBindings(clip);
+        Check(bindings.Any(b => b.type == typeof(Animator) && b.propertyName == "MotionT.y"), $"{name}/{clipName}: motion in MotionT/MotionQ");
+        var root = bones["NPC Root [Root]"]; // the dragon's top-level bone, which the FBX moves by the motion
+        Vector3 rootRest = root.localPosition;
+        string controllerPath = CreatureDir + name + "/HarnessRootMotion.controller";
+        var controller = UnityEditor.Animations.AnimatorController.CreateAnimatorControllerAtPathWithClip(controllerPath, clip);
+        var animator = go.GetComponent<Animator>();
+        var com = bones["NPC COM"];
+        try
+        {
+            foreach (bool apply in new[] { true, false })
+            {
+                go.transform.SetPositionAndRotation(Vector3.zero, Quaternion.identity);
+                animator.runtimeAnimatorController = controller;
+                animator.applyRootMotion = apply;
+                animator.cullingMode = AnimatorCullingMode.AlwaysAnimate;
+                animator.Rebind();
+                animator.Update(0f);
+                float comStart = com.position.y, rootDrift = 0f;
+                for (int f = 1; f < sc.frames; f++)
+                {
+                    animator.Update(1f / sc.fps);
+                    rootDrift = Mathf.Max(rootDrift, (root.localPosition - rootRest).magnitude);
+                }
+                float y = go.transform.position.y, comEnd = com.position.y - y;
+                Lines.Add($"INFO {name}/{clipName}: root motion {apply}: creature at {go.transform.position}, COM {com.position.y:0.000} m, root bone drift {rootDrift:0.0000} m");
+                Check(rootDrift < 1e-3f, $"{name}/{clipName} (root motion {apply}): the root bone stays at rest under the creature ({rootDrift:0.0000} m)");
+                if (apply) Check(Mathf.Abs(y - 2048f * 0.0142875f) < 0.01f, $"{name}/{clipName}: root motion lifts the creature {y:0.000} m (29.261 expected)");
+                else Check(Mathf.Abs(y) < 1e-4f, $"{name}/{clipName}: without root motion the creature stays put ({y:0.0000} m)");
+                // The body's own pose ends back on the ground relative to the root (frame 120: COM local Z 0).
+                Check(Mathf.Abs(comEnd) < 0.01f, $"{name}/{clipName} (root motion {apply}): the body ends at the creature's height ({comEnd:0.000} m above it; it started {comStart:0.00} m up)");
+            }
+        }
+        finally
+        {
+            animator.runtimeAnimatorController = null;
+            animator.applyRootMotion = false;
+            go.transform.SetPositionAndRotation(Vector3.zero, Quaternion.identity);
+            animator.Rebind();
+            AssetDatabase.DeleteAsset(controllerPath);
+        }
+    }
+
+    // A side view framing the whole creature.
+    static void RenderCreature(GameObject go, string path)
+    {
+        var smr = go.GetComponentInChildren<SkinnedMeshRenderer>();
+        var b = smr.bounds;
+        float size = Mathf.Max(b.size.y, b.size.z) * 1.25f;
+        Render(go, path, b.center + new Vector3(size * 2.2f, 0f, 0f), b.center, 30f, 1024, 768);
     }
 
     static void RenderFace(GameObject go, SkinnedMeshRenderer smr, string path, string[] morphs)

@@ -17,11 +17,11 @@ struct Layout {
 	uint32_t splineHeader, blockOffsets, floatBlockOffsets, splineData;
 	uint32_t interleavedTransforms;
 	uint32_t bindSkeletonName, bindAnimation, bindTrackToBone, bindBlendHint;
-	uint32_t refSamples;
+	uint32_t refUp, refSamples;
 };
 
-const Layout kLayout32 = {8, 16, 4, 8, 4, 8, 12, 24, 36, 8, 24, 28, 40, 68, 80, 116, 40, 8, 12, 16, 40, 52};
-const Layout kLayout64 = {16, 24, 8, 16, 8, 16, 24, 40, 56, 16, 32, 40, 56, 88, 104, 152, 56, 16, 24, 32, 64, 56};
+const Layout kLayout32 = {8, 16, 4, 8, 4, 8, 12, 24, 36, 8, 24, 28, 40, 68, 80, 116, 40, 8, 12, 16, 40, 16, 52};
+const Layout kLayout64 = {16, 24, 8, 16, 8, 16, 24, 40, 56, 16, 32, 40, 56, 88, 104, 152, 56, 16, 24, 32, 64, 16, 56};
 
 const Layout& LayoutOf(const HkxPackfile& pf) { return pf.pointerSize() == 8 ? kLayout64 : kLayout32; }
 
@@ -396,9 +396,14 @@ HkxClip ReadClip(const HkxPackfile& pf) {
 	if (auto rf = pf.pointer(obj + L.animMotion, "extractedMotion")) {
 		clip.hasReferenceFrame = true;
 		if (pf.objects().count(*rf) && pf.objects().at(*rf) == "hkaDefaultAnimatedReferenceFrame") {
+			clip.referenceUp = {pf.read<float>(*rf + L.refUp), pf.read<float>(*rf + L.refUp + 4), pf.read<float>(*rf + L.refUp + 8)};
 			auto smp = pf.array(*rf + L.refSamples, "referenceFrameSamples");
-			for (uint32_t i = 0; i < smp.size * 4 && !clip.referenceFrameMoves; i++)
-				clip.referenceFrameMoves = pf.read<float>(smp.data + 4 * i) != 0.0f;
+			for (uint32_t i = 0; i < smp.size; i++) {
+				std::array<float, 4> v;
+				for (int k = 0; k < 4; k++) v[k] = pf.read<float>(smp.data + 16 * i + 4 * k);
+				for (float c : v) clip.referenceFrameMoves = clip.referenceFrameMoves || c != 0.0f;
+				clip.referenceSamples.push_back(v);
+			}
 		}
 	}
 

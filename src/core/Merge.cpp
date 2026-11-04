@@ -318,10 +318,10 @@ MergedModel MergeModel(const MergeRequest& req, const LogFn& log) {
 	Skeleton skel = LoadSkeleton(req.skeletonPath);
 	log(LogLevel::Info, "Skeleton: " + FileName(req.skeletonPath) + " (" + std::to_string(skel.bones.size()) + " nodes)");
 
-	{
+	const bool humanoid = req.rig == Rig::Humanoid;
+	if (humanoid) {
 		std::string missing;
-		for (auto& h : HumanoidMap())
-			if (h.required && skel.find(h.skyrim) < 0) missing += "\n    " + std::string(h.unity) + " -> '" + h.skyrim + "'";
+		for (auto& line : MissingHumanoidBones(skel)) missing += "\n    " + line;
 		if (!missing.empty()) throw Error("Skeleton lacks bones required for a Unity Humanoid:" + missing);
 	}
 
@@ -361,6 +361,7 @@ MergedModel MergeModel(const MergeRequest& req, const LogFn& log) {
 		if (!line.empty()) log(LogLevel::Info, line);
 	const auto& hidden = plan.hidden;
 	MergedModel m;
+	m.rig = req.rig;
 	m.parts = std::move(plan.reports);
 
 	// Every shape goes into the merge; hidden triangles stay until the normals are computed and are
@@ -380,8 +381,8 @@ MergedModel MergeModel(const MergeRequest& req, const LogFn& log) {
 			shapes.push_back(std::move(s));
 		}
 
-	// Output bones: every weighted bone, every Humanoid bone, and all their ancestors below the
-	// skeleton file's own root node (which is just the file's container).
+	// Output bones: every weighted bone, every Humanoid bone (Humanoid rig), every bone asked for, and all
+	// their ancestors below the skeleton file's own root node (which is just the file's container).
 	std::vector<bool> keep(skel.bones.size(), false);
 	auto keepChain = [&](int i) {
 		for (; i > 0 && !keep[i]; i = skel.bones[i].parent) keep[i] = true;
@@ -404,8 +405,11 @@ MergedModel MergeModel(const MergeRequest& req, const LogFn& log) {
 			}
 		}
 	}
-	for (auto& h : HumanoidMap())
-		if (int i = skel.find(h.skyrim); i >= 0) keepChain(i);
+	if (humanoid)
+		for (auto& h : HumanoidMap())
+			if (int i = FindHumanoidBone(skel, h); i >= 0) keepChain(i);
+	for (auto& name : req.keepBones)
+		if (int i = skel.find(name); i > 0) keepChain(i);
 
 	std::vector<int> outIndex(skel.bones.size(), -1);
 	for (size_t i = 1; i < skel.bones.size(); i++) {
@@ -415,8 +419,9 @@ MergedModel MergeModel(const MergeRequest& req, const LogFn& log) {
 		b.parent = outIndex[skel.bones[i].parent]; // -1 when the parent is the file root
 		b.world = skel.bones[i].world.rigid();       // scale is baked into the re-posed vertices
 		b.skeletonIndex = static_cast<int>(i);
-		for (auto& h : HumanoidMap())
-			if (b.name == h.skyrim) b.humanoid = h.unity;
+		if (humanoid)
+			for (auto& h : HumanoidMap())
+				if (static_cast<int>(i) == FindHumanoidBone(skel, h)) b.humanoid = h.unity;
 		outIndex[i] = static_cast<int>(m.bones.size());
 		m.bones.push_back(b);
 	}
@@ -427,9 +432,13 @@ MergedModel MergeModel(const MergeRequest& req, const LogFn& log) {
 	for (size_t si = 0; si < shapes.size(); si++) {
 		const PosedShape& s = shapes[si];
 		MaterialSlot mat = s.material;
-		std::string name = mat.name.empty() ? "Material" : mat.name;
+		// FBX reads ':' as a namespace separator and importers drop what precedes it ("HorseBody:0" becomes
+		// "0"), so material names carry '_' instead.
+		std::string stem = mat.name.empty() ? "Material" : mat.name;
+		std::replace(stem.begin(), stem.end(), ':', '_');
+		std::string name = stem;
 		if (!wholeHidden[si]) { // a shape the outfit hides entirely leaves the model; it takes no name
-			for (int n = 2; usedNames.count(name); n++) name = mat.name + "_" + std::to_string(n);
+			for (int n = 2; usedNames.count(name); n++) name = stem + "_" + std::to_string(n);
 			usedNames.insert(name);
 		}
 		mat.name = name;

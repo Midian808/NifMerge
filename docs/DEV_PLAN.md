@@ -83,7 +83,9 @@ intermediate bone.
 | Eyes / Jaw | none in the vanilla skeleton (eyes are skinned to the head) |
 
 Bone names contain brackets and **significant trailing spaces** (`NPC COM [COM ]`, `NPC L Foot [Lft ]`).
-They must be carried byte-exact.
+They must be carried byte-exact. One mapping has an alternative spelling: the vanilla draugr skeleton names
+its left foot `NPC L Foot [LLft ]`, which `HumanoidMap()` accepts as LeftFoot
+([CREATURE_DESIGN.md](CREATURE_DESIGN.md) C4).
 
 ### 1.4 Rest pose, units, axes
 
@@ -173,7 +175,8 @@ inputs (skeleton.nif, part NIFs, outfit item NIFs, weight)
                 §1.6); one mesh node "<name>_Mesh" (never the file's name, which Unity gives the
                 root); skin clusters (bind = skeleton world) + FbxPose bind pose; per-control-point
                 UVs (V flipped) and normals; one material per submesh
-  → Sidecar     <model>.materials.json: slots, texture paths, shader settings, Humanoid map
+  → Sidecar     <model>.materials.json (formatVersion 3): generator, rig (NifMerge: humanoid), slots,
+                texture paths, shader settings, Humanoid map
 ```
 
 Vertices are **not** welded across parts: that would merge vertices belonging to different material
@@ -204,7 +207,7 @@ built around. glTF imports through packages that do not support Humanoid avatar 
 | M2 | FBX writer: hierarchy, skin, bind pose, materials, UV/normal split, units/axes; materials sidecar | FBX round-trips through the FBX SDK reader with identical rest-pose positions |
 | M3 | Unity verification harness (batch mode): import → Humanoid → assert avatar valid → render a screenshot | passes on every fixture set |
 | M4 | GUI: skeleton picker, part list (add/remove; `_0`/`_1` auto-paired), weight slider, output path, **Go!**, log pane | the end-to-end GUI run produces an output identical to the CLI run |
-| M5 | Unity editor package (`unity/com.nifmerge.importer`): an `AssetPostprocessor` that detects the tool's FBX (via the sidecar), sets `animationType = Human` with the Skyrim → Humanoid mapping from §1.3 and an enforced T-pose, and builds one material per slot from `<model>.materials.json`. Textures are resolved against a configurable Skyrim textures root inside the project (Unity imports `.dds` natively). Tangent-space normal maps get a converted PNG copy (DirectX → Unity green flip, alpha made opaque, because Skyrim stores a specular mask there) imported as a normal map, alpha-tested/blended slots (hair, brows) get cutout/blend set up from `NiAlphaProperty`, and missing textures are listed as warnings, not silently skipped. | the batch-mode harness (M3) imports with the package present: avatar valid + human, all 12 sample slots get materials, every texture found under the root is assigned |
+| M5 | Unity editor package (`unity/com.nifmerge.importer`): an `AssetPostprocessor` that detects the tool's FBX (via the sidecar), sets `animationType = Human` with the Skyrim → Humanoid mapping from §1.3 and an enforced T-pose, and builds one material per slot from `<model>.materials.json`. Textures are resolved against a configurable Skyrim textures root inside the project (Unity imports `.dds` natively, except files whose mip chain stops before 1×1, as many of Skyrim's do; for those the package imports a copy with the chain completed, CREATURE_DESIGN C15). Material names carry `_` where a shape name has `:`, which FBX reads as a namespace separator (CREATURE_DESIGN C16). Tangent-space normal maps get a converted PNG copy (DirectX → Unity green flip, alpha made opaque, because Skyrim stores a specular mask there) imported as a normal map, alpha-tested/blended slots (hair, brows) get cutout/blend set up from `NiAlphaProperty`, and missing textures are listed as warnings, not silently skipped. | the batch-mode harness (M3) imports with the package present: avatar valid + human, all 12 sample slots get materials, every texture found under the root is assigned |
 
 ## 4. Verification (tests exercise the real path)
 
@@ -461,7 +464,7 @@ whole head are kept.
 - GUI: an **Outfit** list with add, remove, clear and pairing. Under each item, a dimmed line from
   `DescribeOutfit` (the same rule, read from the files' slots alone) says what it replaces or that it
   is added; a slot clash shows in red before Go!.
-- Sidecar (still formatVersion 2; the fields are additions): `parts`, and `role` and `slots` per
+- Sidecar fields: `parts`, and `role` and `slots` per
   material. The Unity package's sidecar mirror has the same fields. Its importer is unchanged: the
   items are Standard materials with tangent-space normal maps and alpha, which it already handles.
 - The test harnesses find the body as the skin-tinted slot in body slot 32 (the character's own or an
@@ -514,7 +517,7 @@ The skin slots' `_msn` maps (§1.6) are converted to tangent space by the Unity 
   cosine is 0.91 on all three maps; the next-best mapping scores 0.61 or lower.
 - **Tool side.** Each slot records its skin→rest rotation: the average of the per-vertex rotations,
   with a warning if they spread by more than 2° on a model-space slot. The sidecar
-  (`formatVersion` 2) carries `msnToMesh`, a 3x3 matrix that takes a decoded texel straight to
+  carries `msnToMesh`, a 3x3 matrix that takes a decoded texel straight to
   Unity mesh space. For an unrotated skin space it is the identity, since Skyrim's (r, b, g) maps
   to Unity's (x, z, y).
 - **Unity side.** After import, every texel covered by a slot's triangles is decoded (GPU blit, so

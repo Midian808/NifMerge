@@ -56,6 +56,16 @@ target_link_libraries(skyanim_core PUBLIC nifmerge_core)
 add_executable(SkyAnim src/anim_app/main.cpp src/anim_app/AnimGui.cpp src/app/GuiHost.cpp)
 target_link_libraries(SkyAnim PRIVATE skyanim_core imgui shell32 ole32)
 
+# ---- SkyCreature: a Skyrim creature (skeleton, model parts, clips) -> model FBX + clip FBXs ----------
+add_library(skycreature_core STATIC src/creature/Creature.cpp)
+target_include_directories(skycreature_core PUBLIC src)
+target_link_libraries(skycreature_core PUBLIC skyanim_core)
+
+add_executable(SkyCreature src/creature_app/main.cpp src/creature_app/CreatureGui.cpp src/app/GuiHost.cpp
+    third_party/imgui/misc/cpp/imgui_stdlib.cpp)
+target_include_directories(SkyCreature PRIVATE third_party/imgui)
+target_link_libraries(SkyCreature PRIVATE skycreature_core imgui shell32 ole32)
+
 # ---- Tests ------------------------------------------------------------------------------------
 enable_testing()
 add_subdirectory(tests)

@@ -13,3 +13,8 @@ target_link_libraries(fbx_summary PRIVATE fbxsdk)
 
 add_executable(gui_input gui_input.cpp)
 target_link_libraries(gui_input PRIVATE ole32 shell32 user32)
+
+add_executable(creature_tests creature_tests.cpp)
+target_link_libraries(creature_tests PRIVATE skycreature_core)
+target_compile_definitions(creature_tests PRIVATE NIFMERGE_ROOT="${PROJECT_SOURCE_DIR}")
+add_test(NAME creature_tests COMMAND creature_tests)

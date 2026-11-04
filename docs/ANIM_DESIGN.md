@@ -100,10 +100,14 @@ Sources of the findings:
   - `bow_release`: `arrowRelease` at 0.033 s, `SoundPlay.WPNBowFire` at 0.1 s
   - walk/run: `FootLeft`, `FootRight`
   - LE walk: one event whose text is **empty**
-- **Root motion:** no clip has any forward motion. The LE clips contain an all-zero
+- **Root motion:** the sample walk, run, idle and bow have none. The LE clips contain an all-zero
   `hkaDefaultAnimatedReferenceFrame`; the SE clips contain no root-motion object; Root and COM never move
-  forward. Vanilla keeps locomotion speed in the behavior project's animation data. **Decided
-  2026-10-27: root motion is out; walk/run export in place.**
+  forward (vanilla keeps locomotion speed in the behavior project's animation data), so walk and run play in
+  place. Other clips do carry real root motion: a mod's running backward attack (coverage `root_motion`)
+  moves 26.9 units back and ends 6.3 back; the dragon's takeoff rises 2048 units
+  ([CREATURE_DESIGN.md](CREATURE_DESIGN.md) §1.2). Each sample is translation (x, y, z) plus a yaw of w
+  radians about the up axis, one per frame, and the game's pose is that motion composed over the bones'
+  pose. A moving reference frame is exported (D14).
 - **Scale:** LE `mt_idle` stores junk animated scale (X only, drifting 4.5 → 11 → −1.0; its header
   `type` is also 3 instead of 5). The other samples store exactly 1.0.
 - **Additive clips** (6 scanned, all on the Schlongs of Skyrim aux skeleton `NPC GenitalsBase`):
@@ -136,6 +140,12 @@ Sources of the findings:
   transform curves on those bones are ignored and the body falls to the zero-muscle pose. Generic clips
   therefore play on Generic rigs (an Animator without a Humanoid avatar).
 - A Humanoid clip keeps only muscle curves unless its clip mask names other transforms.
+- **Generic root motion from a motion node is applied twice.** With the dragon's takeoff imported with its
+  root bone as motion node (on the clip, and on the model's avatar too), an Animator with `applyRootMotion`
+  moved the GameObject up 29.26 m *and* kept playing the bone's own 29.26 m: the body ended 58.5 m up. The
+  clip's "Based Upon" settings change nothing. The same motion as the clip's own `MotionT` / `MotionQ`
+  curves, with the bones' curves free of it, lifts the GameObject 29.261 m with the bones at rest under it,
+  and plays in place without `applyRootMotion` (measured on 6000.0, with an AnimatorController).
 - Unity resets a model's clip settings when its animation type changes in the same reimport.
 - Unity gives an animated FBX's model the pose of the animation's **first frame** as its default pose
   (exactly: 0.000 m from frame 0), not the FBX rest pose; for the bow release that is up to 1.2 m from
@@ -159,11 +169,14 @@ Sources of the findings:
 | D5 | **Output form** | One FBX per clip, skeleton only (no mesh), named after the clip, plus a sidecar `<clip>.anim.json`. |
 | D6 | **Bone set in the FBX** | NIF nodes driven by a Havok bone, plus every Humanoid bone, plus all their ancestors below the NIF file root — `Merge`'s `keepChain` rule — so every bone path matches a NifMerge character built from the same `skeleton.nif`. Bones get curves when driven, or when their local transform changes anyway. |
 | D7 | **Events** | Sidecar → Unity package, which writes `ModelImporterClipAnimation.events` (`functionName = "OnSkyrimEvent"`, `stringParameter` = the event text). Empty-text events are dropped and logged. |
-| D8 | **Unity rig type** | The FBX is the same either way; the package sets it from a project setting. **Default Humanoid**: the NifMerge mapping, the avatar built from the rest pose (the sidecar's rest transforms, since Unity gives the model the clip's first frame; §1.6) with a T-pose reference, root rotation/height/XZ baked into the pose (in place), and a clip mask with every transform so twist, physics and weapon bones animate. The rig is imported first and the clip configured on top (§1.6). **Generic**: exact playback on a Generic-rigged character built from the same skeleton. |
-| D9 | **Loop flag** | Measured: loop when the first and last frames agree within 0.5° on every Humanoid bone the clip drives. |
+| D8 | **Unity rig type** | The FBX is the same either way; the package sets it from a project setting, unless the sidecar names the rig (D15). **Default Humanoid**: the NifMerge mapping, the avatar built from the rest pose (the sidecar's rest transforms, since Unity gives the model the clip's first frame; §1.6) with a T-pose reference, root rotation/height/XZ baked into the pose (in place; not for a clip with root motion, D14), and a clip mask with every transform so twist, physics and weapon bones animate. The rig is imported first and the clip configured on top (§1.6). **Generic**: exact playback on a Generic-rigged character built from the same skeleton. |
+| D9 | **Loop flag** | Measured on every Havok bone the clip drives: it loops when, on each, the rotation jump from the last frame back to the first is at most 0.5° or at most twice that bone's largest frame-to-frame step. Cycles are authored either ending on their first pose or one ordinary step before it (wolf trot: 1.06 steps on the tail); one-shot clips jump 15–80 steps (bow release, dragon takeoff). A one-shot clip that ends in its first pose (the dragon's bite) counts as a loop. |
 | D10 | **Rotation curves** | Per-frame Euler keys from the rigid local matrix, linear, then `FbxAnimCurveFilterUnroll` removes ±180° flips. |
 | D11 | **Additive clips** | **Refused** with a clear message. They hold offsets the game layers onto another animation; which side of the base pose Havok composes them on is not recorded in the file, and a guess would export a wrong-but-plausible pose (§1.4, §6). |
 | D12 | **Float tracks** | Decoded around, not exported: they drive skeleton float slots, which have no FBX/Unity bone. The clip exports with a note. |
+| D14 | **Root motion** | **Decided 2026-11-04: exported when the reference frame moves.** Each frame's pose is composed under the reference-frame transform (translation + yaw about up, one sample per frame, else sampled by time) in actor space, so the FBX's top-level bones carry it, as the whole actor moves in game; the sidecar records `rootMotion` and the motion per frame (FBX space). The Unity package rewrites each top-level bone's curves without the motion (Unity applies root motion to the GameObject and would otherwise also play it on the bones, §1.6); a Generic clip gets the motion as its root-motion curves (`MotionT` / `MotionQ`), a Humanoid clip keeps root rotation/height/XZ unbaked so Unity's body-based root motion applies. Root-motion clips import without keyframe reduction: its error grows with a curve's values, and the top-level curves carry the whole motion (reduced, the dragon's root bone drifted 2.6 cm from rest once the motion was taken out). An up axis other than +Z is refused. |
+| D15 | **Unity rig in the sidecar** | `rig`: `either` (the project setting decides, D8) when the skeleton maps onto a Humanoid, else `generic`; SkyCreature writes its creature's rig. |
+| D16 | **Bones with no NIF node** | Driven Havok bones the NIF has no node for are left out with a warning (the human skeleton's three `x_… LookNode` helpers). When no driven bone below the root has a node, the `.nif` is another skeleton: the clip fails, saying so. |
 | D13 | **Rotation formats never seen** | POLAR32 and UNCOMPRESSED are decoded and reported as unverified; THREECOMP24 and STRAIGHT16 are refused, since neither has a published bit layout nor a real sample to derive one from. 8-bit vectors are decoded and reported as unverified. |
 
 ---
@@ -183,7 +196,8 @@ inputs: files and folders (skeleton.nif, skeleton .hkx and clips recognised by c
                  composed through the NIF hierarchy, then rigid(); additive clips refused (D11)
   → Write FBX    shared Skyrim→FBX conversion (Y-up metres, (x,y,z)→(−x,z,y)×0.0142875); bone set D6;
                  one take named after the clip at the file's frame rate; Euler unroll (D10)
-  → Sidecar      <clip>.anim.json: source, platform, skeleton files, frames, fps, duration, loop (D9),
+  → Sidecar      <clip>.anim.json (formatVersion 3): source, platform, skeleton files, rig (D15), frames,
+                 fps, duration, loop (D9), root motion and the motion per frame (D14), driven / skeleton bone counts,
                  events (D7), binding mode, dropped tracks, encodings, Humanoid map, each bone's rest
                  transform (FBX space) for the Humanoid avatar (D8)
 ```
@@ -233,7 +247,8 @@ A run takes any mix of files and folders. The behavior character file is not nee
 - **Failure isolation:** a failing clip is logged with its reason and the batch continues. Skeleton
   problems stop the run before any clip is written.
 - **Report:** log pane / console and `<out>\batch_report.json` (exported, failed with reasons, warnings
-  per clip — dropped tracks, binding conflicts, float tracks, unverified encodings, root motion — and
+  per clip — dropped tracks, binding conflicts, float tracks, unverified encodings, animated bones with no
+  NIF node (D16) — and
   skipped files). The CLI and `--exit-when-done` exit non-zero if any clip failed.
 
 ---
@@ -266,7 +281,8 @@ A run takes any mix of files and folders. The behavior character file is not nee
   - coverage fixtures: an explicit map whose every index names the track's own bone; one made for another
     skeleton variant (breast tracks kept off the Item bones); an uncompressed clip (smooth, still bones at
     rest, a mounted turn that does not loop); float tracks exported with a note; the additive clip refused;
-    the XML tagfile named as such
+    the XML tagfile named as such; the root-motion attack (every bone = the motion composed over the
+    motionless pose, the root following the samples, not a loop)
   - pose: Humanoid bones present, rest pose = the NIF's rigid bind pose, unreachable nodes unmoved, toes on
     the ground, head at standing height, loop flags; a reference-pose frame reproduces the Havok reference
     pose through the NIF hierarchy
@@ -284,7 +300,10 @@ A run takes any mix of files and folders. The behavior character file is not nee
   NifMerge character: Generic (avatar-less) equals the clip's own skeleton exactly, every curve binds, toes
   on the ground, head at standing height. The sidecar's rest pose, converted to Unity space, equals the
   character's rest pose bone for bone. Humanoid plays in place and, retargeted onto the character, stays
-  within 1 cm of the same clip's error on its own model (§1.6); screenshots of both.
+  within 1 cm of the same clip's error on its own model (§1.6); screenshots of both. The root-motion attack,
+  Humanoid on the character through an AnimatorController with `applyRootMotion`: its root not baked, the
+  character moved, the hips on the game's path (the sidecar's motion composed over the Generic copy's
+  in-place pose) and not twice the motion.
 - **`tests/run_anim_gui_test.py`**: `SkyAnim gui <folder> --go --exit-when-done` equals the CLI; real OLE
   drops (skeleton files, then the folder) plus a click on Go! equal the CLI with the skeleton named; a
   failing clip gives exit code 1 with the other clips exported. It moves the mouse.
@@ -305,7 +324,6 @@ A run takes any mix of files and folders. The behavior character file is not nee
 
 ## 7. Explicitly not in this design
 
-- **Root motion:** decided out (§1.4).
 - **Behavior graphs** and **batch export driven by `hkbCharacterData`**: not asked for; inputs are given
   directly.
 - **Writing `.hkx`** (FBX → Skyrim): not asked for.

@@ -353,7 +353,38 @@ namespace NifMerge
                 string p = AssetDatabase.GUIDToAssetPath(guid);
                 map[p.Substring(root.Length + 1).ToLowerInvariant()] = p;
             }
+            // DDS files Unity refused (Skyrim's often stop their mip chain early): a completed copy instead.
+            foreach (string file in Directory.GetFiles(root, "*.dds", SearchOption.AllDirectories))
+            {
+                string p = file.Replace('\\', '/');
+                string rel = p.Substring(root.Length + 1);
+                if (map.ContainsKey(rel.ToLowerInvariant())) continue;
+                string fixedPath = RepairedDds(p, rel, warnings);
+                if (fixedPath != null) map[rel.ToLowerInvariant()] = fixedPath;
+            }
             return map;
+        }
+
+        // Where completed copies of refused DDS files go, mirroring their path below the textures root. Outside
+        // the root, so writing them never triggers a rebuild of every model's materials.
+        public const string RepairedDdsFolder = "Assets/NifMergeTextureFixes";
+
+        static string RepairedDds(string srcPath, string rel, List<string> warnings)
+        {
+            string dst = $"{RepairedDdsFolder}/{rel}";
+            if (!File.Exists(dst) || File.GetLastWriteTimeUtc(dst) < File.GetLastWriteTimeUtc(srcPath))
+            {
+                string why = NifMergeDds.CompleteMipChain(srcPath, dst);
+                if (why != null)
+                {
+                    warnings?.Add($"'{srcPath}' did not import in Unity ({why}); it cannot be used");
+                    return null;
+                }
+                AssetDatabase.ImportAsset(dst, ImportAssetOptions.ForceUpdate);
+            }
+            if (AssetDatabase.LoadAssetAtPath<Texture2D>(dst) != null) return dst;
+            warnings?.Add($"'{srcPath}' did not import in Unity, and neither did its completed copy '{dst}'");
+            return null;
         }
 
         public static Texture2D Resolve(string nifPath, Dictionary<string, string> textures, string what, List<string> warnings)

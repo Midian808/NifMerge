@@ -44,9 +44,10 @@ std::string SidecarPathFor(const std::string& fbxPath) {
 void WriteMaterialsJson(const MergedModel& m, const std::string& fbxPath, const std::string& jsonPath) {
 	std::ostringstream o;
 	o << "{\n";
-	o << "  \"generator\": \"NifMerge\",\n";
-	o << "  \"formatVersion\": 2,\n";
+	o << "  \"generator\": " << JsonQuote(m.generator) << ",\n";
+	o << "  \"formatVersion\": 3,\n";
 	o << "  \"fbx\": " << JsonQuote(fs::u8path(fbxPath).filename().u8string()) << ",\n";
+	o << "  \"rig\": " << JsonQuote(RigName(m.rig)) << ",\n";
 	o << "  \"metresPerGameUnit\": " << JsonNum(kMetresPerUnit) << ",\n";
 
 	o << "  \"humanoid\": [\n";

@@ -367,6 +367,44 @@ TEST(CoverageInterleaved) {
 
 // Float tracks drive skeleton float slots; the transform data around them must still decode exactly
 // (DecodeSpline checks every block's end offset) and the clip exports with a note.
+// A human clip with root motion (a mod's backward running attack): its reference frame moves the actor
+// 26.9 units back and ends 6.3 units back. The root bone carries that motion, every other bone is posed
+// relative to it, and the clip is not a loop.
+TEST(CoverageRootMotion) {
+	HkxClip c = ReadClip(HkxPackfile::Load(Coverage("root_motion.hkx")));
+	CHECK(c.referenceFrameMoves && c.referenceSamples.size() == static_cast<size_t>(c.numFrames), "%zu samples for %d frames",
+		  c.referenceSamples.size(), c.numFrames);
+	double back = 0;
+	for (auto& s : c.referenceSamples) back = std::min(back, static_cast<double>(s[1]));
+	CHECK(std::fabs(back + 26.9) < 0.1 && std::fabs(c.referenceSamples.back()[1] + 6.3) < 0.1, "back %.2f, ends %.2f", back,
+		  c.referenceSamples.back()[1]);
+	ClipBinding b = BindClip(c, SeBody());
+	Skeleton nif = LoadSkeleton(SkeletonNif("SSE"));
+	PosedClip p = PoseClip(c, b, SeBody(), nif);
+	HkxClip still = c;
+	still.referenceFrameMoves = false;
+	PosedClip q = PoseClip(still, b, SeBody(), nif);
+	CHECK(p.rootMotion && p.motion.size() == p.frames.size(), "root motion, %zu frames of it", p.motion.size());
+	double worst = 0, rootErr = 0;
+	int root = -1;
+	for (size_t i = 0; i < p.bones.size(); i++)
+		if (p.bones[i].name == "NPC Root [Root]") root = static_cast<int>(i);
+	for (size_t f = 0; f < p.frames.size(); f++) {
+		const auto& s = c.referenceSamples[f];
+		Xform m;
+		const double cs = std::cos(s[3]), sn = std::sin(s[3]);
+		m.L.m[0] = {cs, -sn, 0};
+		m.L.m[1] = {sn, cs, 0};
+		m.t = {s[0], s[1], s[2]};
+		const Xform motion = nif.bones[0].world * m * nif.bones[0].world.inverse();
+		for (size_t i = 0; i < p.bones.size(); i++) worst = std::max(worst, p.frames[f][i].maxDiff((motion * q.frames[f][i]).rigid()));
+		if (root >= 0) rootErr = std::max(rootErr, (p.frames[f][root].t - (q.frames[f][root].t + Vec3(s[0], s[1], s[2]))).length());
+	}
+	// The samples are 32-bit floats; composed with a rest pose ~100 units out they round at ~1e-6 units.
+	CHECK(worst < 1e-6 && rootErr < 1e-4, "every bone = motion x pose (worst %g), root follows the samples (%g)", worst, rootErr);
+	CHECK(!p.loops, "a one-shot attack does not loop (%.1f deg)", p.loopError);
+}
+
 TEST(CoverageFloatTracks) {
 	HkxClip c = ReadClip(HkxPackfile::Load(Coverage("float_tracks.hkx")));
 	CHECK(c.numFloatTracks == 4 && c.numTracks == 99, "%d float tracks, %d transform tracks", c.numFloatTracks, c.numTracks);
@@ -543,7 +581,10 @@ TEST(FbxRoundTrip) {
 		}
 		CHECK(restEntries == p.bones.size(), "%s: %zu rest entries for %zu bones", s.platform, restEntries, p.bones.size());
 		CHECK(worstRestT < 1e-5 && worstRestR < 0.01, "%s: sidecar rest = NIF bind pose (%g m, %g deg)", s.platform, worstRestT, worstRestR);
-		CHECK(json.find("\"formatVersion\": 2") != std::string::npos, "sidecar format version 2");
+		CHECK(json.find("\"formatVersion\": 3") != std::string::npos, "sidecar format version 3");
+		// The character skeleton maps onto a Humanoid, so the project setting picks the rig; no root motion.
+		CHECK(json.find("\"rig\": \"either\"") != std::string::npos, "%s: rig left to the project setting", s.platform);
+		CHECK(json.find("\"rootMotion\": false,\n  \"motion\": [],") != std::string::npos, "%s: no root motion", s.platform);
 		CHECK(json.find("\"loop\": true") != std::string::npos, "%s: loop flag", s.platform);
 		CHECK(json.find("\"human\": \"Hips\", \"bone\": \"NPC COM [COM ]\"") != std::string::npos, "humanoid map");
 		const bool le = std::string(s.platform) == "LE";

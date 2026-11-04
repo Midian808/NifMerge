@@ -1,6 +1,7 @@
 #include "Batch.hpp"
 
 #include "AnimExport.hpp"
+#include "core/Humanoid.hpp"
 #include "core/NifIO.hpp"
 #include "core/TextUtil.hpp"
 
@@ -115,6 +116,18 @@ BatchResult RunBatch(const BatchRequest& req, const LogFn& log) {
 	if (skeletons.empty()) throw Error(res.skeletonHkx + ": holds no skeleton");
 	log(LogLevel::Info, "Skeleton: " + res.skeletonNif + " + " + res.skeletonHkx);
 	if (in.clips.empty()) throw Error("No animation clips in the selection");
+	std::string rig = "generic";
+	{
+		const std::vector<std::string> missing = MissingHumanoidBones(nif);
+		if (req.rig == BatchRequest::Rig::Humanoid) {
+			std::string lines;
+			for (auto& m : missing) lines += "\n    " + m;
+			if (!missing.empty()) throw Error(res.skeletonNif + " lacks bones required for a Unity Humanoid:" + lines);
+			rig = "humanoid";
+		} else if (req.rig == BatchRequest::Rig::Auto && missing.empty()) {
+			rig = "either";
+		}
+	}
 
 	// Output paths, mirroring the folder each clip was found under. Clips that would share an output
 	// path both fail instead of overwriting each other.
@@ -148,7 +161,7 @@ BatchResult RunBatch(const BatchRequest& req, const LogFn& log) {
 
 			std::error_code ec;
 			fs::create_directories(fs::u8path(outPaths[i]).parent_path(), ec);
-			AnimExportInfo info{clipName, item.clip, res.skeletonNif, res.skeletonHkx, &clip, &binding};
+			AnimExportInfo info{clipName, item.clip, res.skeletonNif, res.skeletonHkx, &clip, &binding, rig};
 			auto warn = [&](LogLevel lvl, const std::string& msg) {
 				if (lvl != LogLevel::Info) item.warnings.push_back(msg);
 				log(lvl, msg);
@@ -171,7 +184,10 @@ BatchResult RunBatch(const BatchRequest& req, const LogFn& log) {
 				warn(LogLevel::Warning, clipName + ": its " + std::to_string(clip.numFloatTracks) +
 											" float tracks drive skeleton float slots, not bones, and are not exported");
 			for (auto& f : clip.unverifiedFormats) warn(LogLevel::Warning, clipName + ": uses " + f + ", which no real sample has verified yet");
-			if (clip.referenceFrameMoves) warn(LogLevel::Warning, clipName + ": has root motion, which is not exported (the clip plays in place)");
+			if (posed.rootMotion) log(LogLevel::Info, clipName + ": has root motion (it moves the actor)");
+			if (!posed.missingNodes.empty())
+				warn(LogLevel::Warning, clipName + ": " + std::to_string(posed.missingNodes.size()) + " animated bones have no node in " +
+											Name(res.skeletonNif) + " and are left out (e.g. '" + posed.missingNodes.front() + "')");
 		} catch (const std::exception& e) {
 			item.error = e.what();
 			log(LogLevel::Error, clipName + ": " + item.error);

@@ -8,6 +8,7 @@ struct RunOptions {
 	MergeRequest request;
 	std::string fbxPath;
 	std::string objPath; // optional debug dump
+	std::string generator = "NifMerge"; // the tool named in the sidecar
 };
 
 struct RunResult {

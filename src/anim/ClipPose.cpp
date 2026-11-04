@@ -3,13 +3,16 @@
 #include "core/Humanoid.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <set>
 
 namespace nm {
 
 namespace {
 
-const double kLoopToleranceDeg = 0.5;
+const double kLoopToleranceDeg = 0.5; // a wrap this small always counts as a loop
+const double kLoopStepFactor = 2.0;    // a wrap up to this many times the bone's largest frame step counts too
 
 } // namespace
 
@@ -97,8 +100,24 @@ PosedClip PoseClip(const HkxClip& clip, const ClipBinding& binding, const HkxSke
 		if (i > 0) nifToHkx[i] = hkx.find(b.name);
 	}
 
+	// Havok bones the clip drives that the NIF has no node for cannot be shown. When that is every driven
+	// bone below the root, the .nif is another skeleton (creature skeletons share only "NPC Root [Root]").
 	PosedClip out;
+	{
+		std::set<int> hasNode(nifToHkx.begin(), nifToHkx.end());
+		bool anyBelowRoot = false;
+		std::set<int> seen;
+		for (int b : binding.trackToBone) {
+			if (b < 0 || !seen.insert(b).second) continue;
+			if (!hasNode.count(b)) out.missingNodes.push_back(hkx.bones[b]);
+			else if (hkx.parents[b] >= 0) anyBelowRoot = true;
+		}
+		if (!anyBelowRoot)
+			throw Error(nif.path + ": none of the bones the clip animates below the root has a node in it (the .nif is not the skeleton of '" +
+						hkx.name + "' in the .hkx)");
+	}
 	out.frameDuration = clip.frameDuration;
+	out.skeletonBones = static_cast<int>(hkx.bones.size());
 
 	// Output bone set (NifMerge's keepChain rule; node 0 is the file's container, not a bone).
 	std::vector<bool> keep(N, false);
@@ -108,7 +127,7 @@ PosedClip PoseClip(const HkxClip& clip, const ClipBinding& binding, const HkxSke
 	for (size_t i = 1; i < N; i++)
 		if (nifToHkx[i] >= 0) keepChain(static_cast<int>(i));
 	for (auto& h : HumanoidMap())
-		if (int i = nif.find(h.skyrim); i >= 0) keepChain(i);
+		if (int i = FindHumanoidBone(nif, h); i >= 0) keepChain(i);
 	std::vector<int> outIndex(N, -1);
 	for (size_t i = 1; i < N; i++) {
 		if (!keep[i]) continue;
@@ -118,10 +137,41 @@ PosedClip PoseClip(const HkxClip& clip, const ClipBinding& binding, const HkxSke
 		b.world = nif.bones[i].world.rigid();
 		b.skeletonIndex = static_cast<int>(i);
 		for (auto& h : HumanoidMap())
-			if (b.name == h.skyrim) b.humanoid = h.unity;
+			if (static_cast<int>(i) == FindHumanoidBone(nif, h)) b.humanoid = h.unity;
 		outIndex[i] = static_cast<int>(out.bones.size());
 		out.bones.push_back(b);
 		out.driven.push_back(nifToHkx[i] >= 0);
+	}
+
+	// Root motion: the reference frame moves the whole actor, so it is composed over every bone's pose in
+	// actor space (the file root's): W0 * M * W0^-1. The top-level bones carry it; locals below are unchanged.
+	if (clip.referenceFrameMoves) {
+		const Vec3 up = clip.referenceUp;
+		if (std::fabs(up.x) > 1e-6 || std::fabs(up.y) > 1e-6 || std::fabs(up.z - 1.0) > 1e-6)
+			throw Error(clip.path + ": its root motion's up axis is (" + std::to_string(up.x) + ", " + std::to_string(up.y) + ", " +
+						std::to_string(up.z) + "), not +Z; only +Z is supported");
+		if (clip.referenceSamples.empty()) throw Error(clip.path + ": its root motion has no samples");
+		out.rootMotion = true;
+		const Xform w0 = nif.bones[0].world;
+
+		// One sample per frame in Skyrim's clips; otherwise sampled by time, linearly.
+		const auto& smp = clip.referenceSamples;
+		for (int f = 0; f < clip.numFrames; f++) {
+			double u = smp.size() == static_cast<size_t>(clip.numFrames) || clip.numFrames < 2
+						   ? f
+						   : static_cast<double>(f) * (smp.size() - 1) / (clip.numFrames - 1);
+			size_t a = std::min(static_cast<size_t>(u), smp.size() - 1), b = std::min(a + 1, smp.size() - 1);
+			double k = u - static_cast<double>(a);
+			std::array<double, 4> v;
+			for (int c = 0; c < 4; c++) v[c] = smp[a][c] * (1 - k) + smp[b][c] * k;
+			Xform m;
+			const double cs = std::cos(v[3]), sn = std::sin(v[3]);
+			m.L.m[0] = {cs, -sn, 0};
+			m.L.m[1] = {sn, cs, 0};
+			m.L.m[2] = {0, 0, 1};
+			m.t = {v[0], v[1], v[2]};
+			out.motion.push_back(w0 * m * w0.inverse());
+		}
 	}
 
 	// Havok locals per frame: the reference pose, overridden by each bound track (scale ignored).
@@ -148,17 +198,28 @@ PosedClip PoseClip(const HkxClip& clip, const ClipBinding& binding, const HkxSke
 		}
 		auto& row = out.frames[f];
 		row.reserve(out.bones.size());
-		for (auto& b : out.bones) row.push_back(world[b.skeletonIndex].rigid());
+		for (auto& b : out.bones) row.push_back(out.rootMotion ? (out.motion[f] * world[b.skeletonIndex]).rigid() : world[b.skeletonIndex].rigid());
 	}
 
-	// Loop detection on the Humanoid bones the clip drives.
-	auto first = havokLocals(0), last = havokLocals(clip.numFrames - 1);
-	for (auto& h : HumanoidMap()) {
-		int b = hkx.find(h.skyrim);
-		if (b < 0 || std::find(binding.trackToBone.begin(), binding.trackToBone.end(), b) == binding.trackToBone.end()) continue;
-		out.loopError = std::max(out.loopError, first[b].r.angleTo(last[b].r) * 180.0 / 3.14159265358979323846);
+	// Loop detection on every bone the clip drives (the root motion is separate and not part of it): the
+	// clip loops when wrapping from its last frame to its first is no bigger a jump, on any bone, than the
+	// bone's own motion between frames. Cycles are authored either with the last frame equal to the first
+	// or one ordinary step before it; one-shot clips jump many steps.
+	std::set<int> bound;
+	for (int b : binding.trackToBone)
+		if (b >= 0) bound.insert(b);
+	out.drivenBones = static_cast<int>(bound.size());
+	std::vector<std::vector<HkTransform>> locals;
+	for (int f = 0; f < clip.numFrames; f++) locals.push_back(havokLocals(f));
+	const double deg = 180.0 / 3.14159265358979323846;
+	out.loops = clip.numFrames > 2;
+	for (int b : bound) {
+		double step = 0;
+		for (int f = 0; f + 1 < clip.numFrames; f++) step = std::max(step, locals[f][b].r.angleTo(locals[f + 1][b].r) * deg);
+		const double gap = locals.front()[b].r.angleTo(locals.back()[b].r) * deg;
+		out.loopError = std::max(out.loopError, gap);
+		if (gap > std::max(kLoopToleranceDeg, kLoopStepFactor * step)) out.loops = false;
 	}
-	out.loops = clip.numFrames > 2 && out.loopError <= kLoopToleranceDeg;
 	return out;
 }
 

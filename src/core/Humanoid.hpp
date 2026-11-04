@@ -10,6 +10,7 @@ struct HumanoidBone {
 	const char* unity;
 	const char* skyrim;
 	bool required;
+	const char* alias = nullptr; // another spelling some skeletons use for the same bone
 };
 
 inline const std::vector<HumanoidBone>& HumanoidMap() {
@@ -33,7 +34,7 @@ inline const std::vector<HumanoidBone>& HumanoidMap() {
 		{"RightUpperLeg", "NPC R Thigh [RThg]", true},
 		{"LeftLowerLeg", "NPC L Calf [LClf]", true},
 		{"RightLowerLeg", "NPC R Calf [RClf]", true},
-		{"LeftFoot", "NPC L Foot [Lft ]", true},
+		{"LeftFoot", "NPC L Foot [Lft ]", true, "NPC L Foot [LLft ]"}, // the vanilla draugr skeleton's spelling
 		{"RightFoot", "NPC R Foot [Rft ]", true},
 		{"LeftToes", "NPC L Toe0 [LToe]", false},
 		{"RightToes", "NPC R Toe0 [RToe]", false},
@@ -69,6 +70,25 @@ inline const std::vector<HumanoidBone>& HumanoidMap() {
 		{"Right Little Distal", "NPC R Finger42 [RF42]", false},
 	};
 	return map;
+}
+
+// The skeleton's index of a Humanoid bone: its usual name, else its alias; -1 when it has neither.
+// Works for any skeleton type with find(name).
+template <class Skel>
+int FindHumanoidBone(const Skel& skel, const HumanoidBone& h) {
+	int i = skel.find(h.skyrim);
+	if (i < 0 && h.alias) i = skel.find(h.alias);
+	return i;
+}
+
+// The required Humanoid bones the skeleton lacks, as "Unity -> 'Skyrim'" lines; empty when it can be
+// imported as a Unity Humanoid.
+template <class Skel>
+std::vector<std::string> MissingHumanoidBones(const Skel& skel) {
+	std::vector<std::string> missing;
+	for (auto& h : HumanoidMap())
+		if (h.required && FindHumanoidBone(skel, h) < 0) missing.push_back(std::string(h.unity) + " -> '" + h.skyrim + "'");
+	return missing;
 }
 
 } // namespace nm

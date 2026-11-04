@@ -89,6 +89,10 @@ switched off, because they are masks. Normal maps are converted to PNGs Unity's 
   space over the imported mesh at full resolution (`<name>_unity_ts_n.png`). A 4K body map takes a
   few seconds.
 
+Skyrim's DDS files often stop their mip chain before 1×1, which Unity refuses to import; the package
+then uses a copy with the chain completed (every original level unchanged), written to
+`Assets/NifMergeTextureFixes`.
+
 *Tools → NifMerge* rebuilds materials after adding textures.
 
 Known limits, the first reported per slot in the import report:
@@ -123,9 +127,12 @@ still export.
 
 In Unity, the same package imports these automatically: Humanoid by default (retargetable; set
 *Project Settings > NifMerge Importer > SkyAnim animations import as* to Generic for exact playback on a
-Generic-rigged character built from the same skeleton). The clip is named after the source, loops when its
-first and last frames match, plays in place, and Skyrim's annotations (`FootLeft`, `arrowRelease`,
-`SoundPlay.WPNBowFire`, ...) become animation events calling `OnSkyrimEvent(string)`.
+Generic-rigged character built from the same skeleton). A skeleton that cannot be a Humanoid (a creature's)
+always imports Generic. The clip is named after the source and loops when wrapping from its last frame to its
+first is no bigger a jump than the clip's own motion between frames. A clip whose Havok reference frame moves
+(root motion, e.g. a dragon taking off) carries that motion on its root bone and the Animator applies it;
+every other clip plays in place. Skyrim's annotations (`FootLeft`, `arrowRelease`, `SoundPlay.WPNBowFire`,
+...) become animation events calling `OnSkyrimEvent(string)`.
 
 ```
 SkyAnim export [--skeleton <skeleton.nif>] [--hkx <skeleton.hkx>] <file|folder>... --out <folder>
@@ -135,6 +142,28 @@ SkyAnim scan <folder> [--list <encoding>]
 
 Design, findings and known gaps (XML tagfiles, additive clips):
 [docs/ANIM_DESIGN.md](docs/ANIM_DESIGN.md).
+
+## SkyCreature: Skyrim creatures to FBX
+
+`build\Release\SkyCreature.exe` converts a creature (wolf, horse, dragon, draugr, ...): its `skeleton.nif`,
+its Havok `skeleton.hkx`, its model `.nif` files and its animation clips. Drag them onto the window (files are
+sorted by content: a `.nif` without shapes is the skeleton, one with shapes a model part; folders are searched
+for `.hkx` clips and the Havok skeleton, and `.nif` files inside folders are skipped, since a creature's folder
+holds every variant of its model), pick an output folder and press **Go!**.
+
+Output: `<name>.fbx` + `<name>.materials.json` (the parts merged on the skeleton, one material slot per shape)
+and `anims\` with one `.fbx` + `.anim.json` per clip, plus `anims\batch_report.json`. `<name>` is the first
+part's file name unless given. The rig is **Humanoid** when the skeleton has every Humanoid bone (the draugr),
+else **Generic** (wolf, horse, dragon); the model and its clips always share it, and the Unity package imports
+both that way. Generic clips play on the model by bone path.
+
+```
+SkyCreature export [--skeleton <skeleton.nif>] [--hkx <skeleton.hkx>] [--part <model.nif>]...
+                   [--rig auto|humanoid|generic] [--name <name>] <file|folder>... --out <folder>
+SkyCreature gui [the export options] [--go] [--exit-when-done] [--write-layout <file>] <file|folder>...
+```
+
+Design, findings and known gaps: [docs/CREATURE_DESIGN.md](docs/CREATURE_DESIGN.md).
 
 ## Building
 
@@ -156,13 +185,18 @@ Set `NIFMERGE_BUILD=<build dir>` to point the Python tests at a build tree other
 | `build\tests\Release\core_tests.exe` | Re-pose vs. an independent evaluation of the game's skinning formula (nifly math) on every sample and fixture; FaceGen part placement; weight blending; seam-continuous normals; merge invariants; FBX read-back (geometry, materials, bind pose = rest pose); TRI decoding; morph-to-part matching decisions; exact reproduction of matched morphs; surface transfer (left/right consistency against the source masks' own, locality); blend shapes surviving the FBX round trip; outfit: each sample item replacing or adding exactly what its slots say, the head's eyes, mouth and brows kept, everything left visible unchanged, seam-continuous normals when dressed, two items in one slot rejected, and (with nifly-written stand-ins) a helmet hiding only the hair and per-partition hiding of a body split into two slots; Skyrim LE (stream 83): the game's own LE male body, hands, feet and head merged (materials, partitions, seam normals), an LE cuirass worn with its effect-shader glow, LE eyes' `.tri` morphs reproduced exactly, the game's male masks on the LE head, an `NiTriStrips` copy of an LE body merging identically to the original, and the sample character, FaceGen head and outfit backported to LE (by nifly's `OptimizeFor`, the conversion SSE NIF Optimizer runs), alone and mixed with SE files, merging as the SE set does. |
 | `python tests\run_gui_test.py` | Drives the real GUI (`gui --go`, the character wearing the sample outfit) and checks its output is identical to the CLI's, plus exit codes and a window screenshot. Then builds the same character by real drag and drop (`gui_input`: OLE drags, as from Explorer, onto each section, and a real click on Go!) and checks that output is identical too, which only holds if every file landed in the section it was dropped on. It moves the mouse, so leave it alone while it runs. |
 | `python tests\run_unity_harness.py` | Batch-mode Unity (6000.0 and 2022.3): automatic import → valid Humanoid avatar, every bone mapping, 12 materials (Skyrim Skin on skin slots, Standard elsewhere), skin specular (the `_s` mask assigned and imported as data, colour × strength and glossiness carried over, and a rendered quad matching Skyrim's specular formula at two light angles, in Gamma and Linear colour space), texture resolution, normal-map conversion, model-space → tangent-space bake of the user's real `_msn` maps (round-trip, agreement with Unity's mesh normals, no added seams), orientation/scale, bind-pose skinning, T-pose reference, retargeting vs. a canonical T-pose rig, blend shapes (all imported, at rest when zeroed, blinks on the correct side, `Aah` opens the mouth, head-only), screenshots including face close-ups. A second model wears the sample outfit: Humanoid, the replaced parts absent, every material built, the items' normal maps converted and alpha modes set, the dress's body copy baked from its `_msn` map. |
-| `build\tests\Release\anim_tests.exe` | SkyAnim: LE and SE packfile layouts, skeletons, every sample clip decoded (frames, encodings, events), still tracks at the reference pose, binding by name / index / explicit map (including a map made for another skeleton variant), uncompressed and float-track clips, additive and XML files refused, the pose on the NIF skeleton (rest = NifMerge's, feet on the ground, loop flags), FBX read-back of every bone at every frame, batch mode (classification, mirrored output, failure isolation, report, skeleton ambiguity, collisions). |
+| `build\tests\Release\anim_tests.exe` | SkyAnim: LE and SE packfile layouts, skeletons, every sample clip decoded (frames, encodings, events), still tracks at the reference pose, binding by name / index / explicit map (including a map made for another skeleton variant), uncompressed and float-track clips, additive and XML files refused, root motion composed over the pose, the pose on the NIF skeleton (rest = NifMerge's, feet on the ground, loop flags), FBX read-back of every bone at every frame, batch mode (classification, mirrored output, failure isolation, report, skeleton ambiguity, collisions). |
 | `python tests\run_anim_oracle.py` | SkyAnim's decoder against an independent Python decoder (`tests/hkx_oracle`) on every sample clip, frame by frame, plus block end offsets, the smallest-three property and block seams. |
 | `python tests\run_anim_gui_test.py` | The SkyAnim GUI: `--go` output identical to the CLI's, real drag and drop of the skeleton files and an animations folder plus a click on Go! identical too, exit code 1 when a clip fails. It moves the mouse. |
+| `build\tests\Release\creature_tests.exe` | SkyCreature on the four sample creatures: rig detection (the draugr's `[LLft ]` foot alias), every model merging on its skeleton (weights, standing on its feet; the horse's re-posed vertices equal its file's), every clip exported with its measured loop flag, driven-bone count and rig, the dragon takeoff's root motion (every bone = motion × pose, 2048 units in the FBX), a mismatched skeleton named, input sorting, model-only runs, forced Generic, clip bone paths = the model's. |
+| `python tests\run_creature_gui_test.py` | The SkyCreature GUI: `--go` output identical to the CLI's, real drag and drop of the skeleton, the model and an animations folder plus a click on Go! identical too, exit code 1 when a clip fails (the rest written) and when the model cannot be made (nothing written). It moves the mouse. |
 
 `run_unity_harness.py` also imports SkyAnim clips (SE walk, run, idle; LE bow) for the sample character
 and plays them on it: Humanoid and Generic import, events, loop flags, twist bones, exact Generic playback,
 Humanoid playback in place and as faithful as the clip on its own model (avatar built from the rest pose).
+It also imports the four SkyCreature sample creatures with their real textures: Generic (or, for the
+draugr, Humanoid) avatars, every material's diffuse, every clip binding and playing on its creature exactly
+as on its own skeleton, and the dragon's takeoff lifting it 29.26 m through Animator root motion.
 
 The tests need two sets of Skyrim assets, and neither is committed, because the repository may not
 redistribute them. A missing fixture fails the tests.
@@ -179,7 +213,10 @@ redistribute them. A missing fixture fails the tests.
   and the clips `mt_idle`, `mt_walkforward`, `mt_runforward` (LE also `bow_release` and
   `defaultfemale.hkx`), and `coverage/`: mod clips using the encodings those lack (`interleaved`,
   `explicit_binding_agrees`, `explicit_binding_other_skeleton`, `float_tracks`, `additive`,
-  `xml_tagfile`).
+  `xml_tagfile`, `root_motion`: a running attack with real root motion).
+- `samples/Creatures/`: SkyCreature's set, vanilla SE extracts: `Wolf/`, `Horse/`, `Dragon/` and `Draugr/`,
+  each with `skeleton.nif`, `skeleton.hkx`, the model NIFs, a clip folder (`anims`, `animations` or
+  `animation`) and a flat `textures/` folder.
 
 ## Third-party code
 
